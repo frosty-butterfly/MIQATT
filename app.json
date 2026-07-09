@@ -32,6 +32,11 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
+      ],[
+        "expo-location",
+        {
+          "locationWhenInUsePermissionDescription": "MIQAT uses your location to fetch accurate daily prayer times."
+        }
       ]
     ],
     "experiments": {
