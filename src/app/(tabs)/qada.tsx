@@ -2,7 +2,6 @@
 import { useRouter } from "expo-router";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import {
-  addDoc,
   collection,
   deleteDoc,
   doc,
@@ -11,21 +10,23 @@ import {
   onSnapshot,
   orderBy,
   query,
+  setDoc,
   updateDoc,
-  where,
+  where
 } from "firebase/firestore";
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Modal,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
-  View,
+  View
 } from "react-native";
+import { Calendar } from "react-native-calendars";
 import { auth, db } from "../../../firebaseConfig";
 import Header from "../../components/header";
 import { useClock } from "../../hooks/useClock";
@@ -61,7 +62,7 @@ export default function QadaScreen() {
   const [loading, setLoading] = useState(true);
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [selectedPrayer, setSelectedPrayer] = useState(PRAYERS[0]);
-  const [originalDate, setOriginalDate] = useState("");
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split("T")[0]);
   const [markedDates, setMarkedDates] = useState<Record<string, any>>({});
 
 
@@ -133,36 +134,63 @@ useEffect(() => {
 
   // ---------- CRUD operations ----------
   const addEntry = async () => {
-    if (!originalDate.trim()) return;
-    await addDoc(collection(db, "qadaDebts"), {
+  if (!uid) {
+    Alert.alert("Not signed in", "Please log in again before adding an entry.");
+    return;
+  }
+  if (!selectedDate) {
+    Alert.alert("Missing date", "Please select the original date.");
+    return;
+  }
+
+  const entryId = `${uid}_${selectedDate}_${selectedPrayer}`;
+  const entryRef = doc(db, "qadaDebts", entryId);
+
+  try {
+    const existing = await getDoc(entryRef);
+    if (existing.exists()) {
+      Alert.alert(
+        "Already logged",
+        `You've already logged a missed ${selectedPrayer} for ${selectedDate}.`
+      );
+      return;
+    }
+
+    await setDoc(entryRef, {
       User_ID: uid,
       Prayer_Name: selectedPrayer,
-      Original_Date: originalDate.trim(),
+      Original_Date: selectedDate,
       Is_Completed: false,
       Completed_At: null,
+      Source: "manual",
     });
-    setOriginalDate("");
     setAddModalVisible(false);
-  };
+  } catch (err: any) {
+    console.error("Failed to add qada entry:", err);
+    Alert.alert("Error", err.message ?? "Could not save this entry. Please try again.");
+  }
+};
 
   const markDone = async (id: string) => {
+  try {
     await updateDoc(doc(db, "qadaDebts", id), {
       Is_Completed: true,
       Completed_At: new Date().toISOString(),
     });
-    // Optionally update linked prayer log if you stored PrayerLog_ID
-    const qadaDoc = await getDoc(doc(db, "qadaDebts", id));
-    const data = qadaDoc.data();
-    if (data?.PrayerLog_ID) {
-      await updateDoc(doc(db, "prayerLogs", data.PrayerLog_ID), {
-        status: "Qada",
-      });
-    }
-  };
+  } catch (err) {
+    console.error("Failed to mark done:", err);
+    Alert.alert("Error", "Could not update this entry.");
+  }
+};
 
-  const removeEntry = async (id: string) => {
+const removeEntry = async (id: string) => {
+  try {
     await deleteDoc(doc(db, "qadaDebts", id));
-  };
+  } catch (err) {
+    console.error("Failed to remove entry:", err);
+    Alert.alert("Error", "Could not delete this entry.");
+  }
+};
 
   const handleLogout = async () => {
     await signOut(auth);
@@ -257,21 +285,33 @@ useEffect(() => {
               ))}
             </View>
 
-            <Text style={styles.modalLabel}>Original Date (YYYY-MM-DD)</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="2026-06-12"
-              placeholderTextColor="#6b7280"
-              value={originalDate}
-              onChangeText={setOriginalDate}
+            <Text style={styles.modalLabel}>Original Date</Text>
+            <Calendar current={selectedDate}
+              onDayPress={(day: any) => setSelectedDate(day.dateString)}
+              maxDate={new Date().toISOString().split("T")[0]}
+              markedDates={{
+                [selectedDate]: { selected: true, selectedColor: "#22c55e" },
+              }}
+              theme={{
+                backgroundColor: "#0f1115",
+                calendarBackground: "#0f1115",
+                textSectionTitleColor: "#9ca3af",
+                dayTextColor: "#fff",
+                monthTextColor: "#fff",
+                todayTextColor: "#22c55e",
+                arrowColor: "#22c55e",
+                selectedDayBackgroundColor: "#22c55e",
+                selectedDayTextColor: "#0f1115",
+              }}
+              style={{ borderRadius: 8, marginBottom: 16 }}
             />
 
-            <TouchableOpacity style={styles.addButton} onPress={addEntry}>
-              <Text style={styles.addButtonText}>Save Entry</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => setAddModalVisible(false)}>
-              <Text style={styles.modalCancel}>Cancel</Text>
-            </TouchableOpacity>
+            <TouchableOpacity style={styles.modalSaveButton} onPress={addEntry}>
+            <Text style={styles.addButtonText}>Save Entry</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.modalCancelButton} onPress={() => setAddModalVisible(false)}>
+            <Text style={styles.modalCancel}>Cancel</Text>
+          </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -293,6 +333,17 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
   },
+  modalSaveButton: {
+  backgroundColor: "#1a3d2a",
+  borderRadius: 8,
+  padding: 14,
+  alignItems: "center",
+  marginTop: 8,
+},
+modalCancelButton: {
+  marginTop: 14,
+  alignItems: "center",
+},
   outstandingLabel: { color: "#9ca3af" },
   outstandingValue: { color: "#f59e0b", fontWeight: "bold", fontSize: 16 },
   entryRow: {

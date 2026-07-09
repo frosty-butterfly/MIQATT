@@ -33,8 +33,16 @@ import { useClock } from "../../hooks/useClock";
 const PRAYERS = ["Subuh", "Zohor", "Asar", "Maghrib", "Isyak"];
 const STATUS_OPTIONS = ["Prayed on time", "Prayed late", "Missed"];
 
+// Local-time date key (NOT UTC) — fixes the pre-8AM "yesterday's data" bug
+function localDateKey(d: Date) {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function todayKey() {
-  return new Date().toISOString().split("T")[0];
+  return localDateKey(new Date());
 }
 
 function dayColor(prayers: Record<string, string> | undefined) {
@@ -60,7 +68,6 @@ export default function TrackerScreen() {
   const [pickerFor, setPickerFor] = useState<string | null>(null);
 
   const [markedDates, setMarkedDates] = useState<Record<string, any>>({});
-  const [calendarVisible, setCalendarVisible] = useState(false);
 
   const [prayerTimes, setPrayerTimes] = useState<Record<string, string>>({});
   const [locationLabel, setLocationLabel] = useState<string>("");
@@ -202,7 +209,7 @@ export default function TrackerScreen() {
 
     for (const docSnap of snap.docs) {
       const data = docSnap.data();
-      const expectedKey = checkDate.toISOString().split("T")[0];
+      const expectedKey = localDateKey(checkDate);
       if (data.Prayer_Date !== expectedKey) break;
 
       const prayers = data.prayers || {};
@@ -215,7 +222,6 @@ export default function TrackerScreen() {
     setStreak(count);
     await setDoc(doc(db, "users", userId), { Current_Streak: count }, { merge: true });
   };
-  
 
   // ---------- Calendar marks ----------
   const loadCalendarMarks = async (userId: string) => {
@@ -233,8 +239,6 @@ export default function TrackerScreen() {
     });
     setMarkedDates(marks);
   };
-
-  
 
   // ---------- Prayer times ----------
   const fetchPrayerTimes = async () => {
@@ -331,13 +335,13 @@ export default function TrackerScreen() {
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 60 }}>
       {/* Shared Header */}
       <Header
-          fullName={fullName}
-          onLogout={handleLogout}
-          locationLabel={locationLabel}
-          timeString={timeString}
-          dateString={dateString}
-          markedDates={markedDates}
-        />
+        fullName={fullName}
+        onLogout={handleLogout}
+        locationLabel={locationLabel}
+        timeString={timeString}
+        dateString={dateString}
+        markedDates={markedDates}
+      />
 
       {/* Streak Card */}
       <View style={styles.streakCard}>
@@ -406,11 +410,6 @@ export default function TrackerScreen() {
           </View>
         </View>
       </Modal>
-
-      {/* Calendar Modal (managed by Header, but we still have it here? 
-          Actually Header already has its own calendar modal, but Tracker used to have one too.
-          We removed it because Header now provides the calendar modal. 
-          So we delete this calendar modal below. */}
     </ScrollView>
   );
 }
