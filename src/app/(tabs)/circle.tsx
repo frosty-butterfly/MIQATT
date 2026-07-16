@@ -4,6 +4,7 @@ import { useRouter } from 'expo-router';
 import { onAuthStateChanged } from "firebase/auth";
 import {
   addDoc,
+  arrayUnion,
   collection,
   deleteDoc,
   doc,
@@ -13,7 +14,8 @@ import {
   onSnapshot,
   orderBy,
   query,
-  where
+  updateDoc,
+  where,
 } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import {
@@ -30,7 +32,6 @@ import {
 } from 'react-native';
 import { auth, db } from '../../../firebaseConfig';
 import AppHeader from '../../components/appHeader';
-import { useClock } from '../../hooks/useClock';
 
 const COLORS = {
   cream: '#F8F4EC',
@@ -47,15 +48,12 @@ const COLORS = {
   navy: '#1A237E',
 };
 
-const PRAYERS = ['Subuh', 'Zohor', 'Asar', 'Maghrib', 'Isyak'];
-
 type Circle = { id: string; Circle_Name: string };
 type Member = {
   uid: string;
   Full_Name: string;
   Username: string;
   Current_Streak: number;
-  // temporary field for today's prayer status
   hasPrayedToday?: boolean;
 };
 type Request = {
@@ -85,7 +83,8 @@ type FeedEntry = {
   prayer: string;
   status: string;
   timestamp: string;
-  type: 'prayer' | 'qada' | 'missed';
+  type: 'prayer' | 'qada' | 'missed' | 'broadcast';
+  message?: string;
 };
 type Challenge = {
   id: string;
@@ -95,12 +94,19 @@ type Challenge = {
   startDate: string;
   endDate: string;
   requiredCount: number;
-  progress?: number; // computed locally
+};
+type WakeRequest = {
+  id: string;
+  circleId: string;
+  requesterUid: string;
+  requesterName: string;
+  timestamp: string;
+  status: 'pending' | 'accepted' | 'rejected';
+  acceptedBy: string[];
 };
 
 export default function CircleScreen() {
   const router = useRouter();
-  const { timeString, dateString } = useClock();
 
   const [uid, setUid] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
@@ -114,7 +120,10 @@ export default function CircleScreen() {
 
   const [feed, setFeed] = useState<FeedEntry[]>([]);
   const [challenge, setChallenge] = useState<Challenge | null>(null);
-  const [wakeRequests, setWakeRequests] = useState<any[]>([]); // for simplicity
+  const [wakeRequests, setWakeRequests] = useState<WakeRequest[]>([]);
+  const [myWakeRequest, setMyWakeRequest] = useState<WakeRequest | null>(null);
+
+  const [todayPrayerLogs, setTodayPrayerLogs] = useState<Record<string, any>>({});
 
   const [createModalVisible, setCreateModalVisible] = useState(false);
   const [newCircleName, setNewCircleName] = useState('');
@@ -124,13 +133,19 @@ export default function CircleScreen() {
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
 
-  const [encouragements, setEncouragements] = useState<Encouragement[]>([]);
-  const [viewEncouragementsVisible, setViewEncouragementsVisible] = useState(false);
-
+  // Cheer modal state (sending to a specific member)
   const [cheerModalVisible, setCheerModalVisible] = useState(false);
   const [cheerTargetUid, setCheerTargetUid] = useState('');
   const [cheerTargetName, setCheerTargetName] = useState('');
   const [cheerMessage, setCheerMessage] = useState('Keep going, you\'ve got this! 💪');
+
+  // Broadcast modal state
+  const [broadcastModalVisible, setBroadcastModalVisible] = useState(false);
+  const [broadcastMessage, setBroadcastMessage] = useState('');
+
+  // Cheer All modal state
+  const [cheerAllModalVisible, setCheerAllModalVisible] = useState(false);
+  const [cheerAllMessage, setCheerAllMessage] = useState('May Allah bless you all! 🌟');
 
   // ---------- Auth ----------
   useEffect(() => {
@@ -178,7 +193,7 @@ export default function CircleScreen() {
     );
     const unsubReq = onSnapshot(reqQ, (snap) => {
       setIncomingRequests(
-        snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Request, 'id'>) }))
+        snap.docs.map((d) => ({ ...(d.data() as Omit<Request, 'id'>), id: d.id }))
       );
     });
 
@@ -204,7 +219,6 @@ export default function CircleScreen() {
         setMembers([]);
         return;
       }
-      // Fetch users
       const usersQ = query(collection(db, 'users'), where(documentId(), 'in', uids.slice(0, 10)));
       const userSnaps = await getDocs(usersQ);
       const memberList = userSnaps.docs.map((d) => ({
@@ -213,34 +227,79 @@ export default function CircleScreen() {
         Username: d.data().Username,
         Current_Streak: d.data().Current_Streak ?? 0,
       }));
-
-      // For each member, fetch today's prayer status
-      const today = new Date().toISOString().split('T')[0];
-      const membersWithPrayer = await Promise.all(
-        memberList.map(async (member) => {
-          try {
-            const logRef = doc(db, 'prayerLogs', `${member.uid}_${today}`);
-            const logSnap = await getDoc(logRef);
-            if (logSnap.exists()) {
-              const prayers = logSnap.data().prayers || {};
-              // Check if any prayer is logged as "Prayed on time" or "Prayed late"
-              const hasPrayedToday = Object.values(prayers).some(
-                (status) => status === 'Prayed on time' || status === 'Prayed late'
-              );
-              return { ...member, hasPrayedToday };
-            }
-            return { ...member, hasPrayedToday: false };
-          } catch {
-            return { ...member, hasPrayedToday: false };
-          }
-        })
-      );
-      setMembers(membersWithPrayer);
+      setMembers(memberList);
     });
     return unsub;
   }, [selectedCircle]);
 
-  // ---------- Feed listener ----------
+  // ---------- Real-time prayer logs listener (for challenge progress) ----------
+  useEffect(() => {
+    if (!selectedCircle || members.length === 0) {
+      console.log('⏭️ Skipping prayer logs listener: no circle or members');
+      return;
+    }
+
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const today = `${year}-${month}-${day}`;
+    const memberUids = members.map((m) => m.uid);
+
+    console.log('📡 Setting up prayer logs listener for circle:', selectedCircle.Circle_Name);
+    console.log('👥 Members UIDs:', memberUids);
+    console.log('📅 Today (local date):', today);
+
+    if (memberUids.length === 0) return;
+
+    const chunkSize = 10;
+    const chunks = [];
+    for (let i = 0; i < memberUids.length; i += chunkSize) {
+      chunks.push(memberUids.slice(i, i + chunkSize));
+    }
+
+    const unsubscribers: (() => void)[] = [];
+
+    chunks.forEach((chunk) => {
+      const q = query(
+        collection(db, 'prayerLogs'),
+        where('User_ID', 'in', chunk),
+        where('Prayer_Date', '==', today)
+      );
+      const unsub = onSnapshot(q, (snap) => {
+        console.log('🔄 Prayer logs snapshot received. Docs count:', snap.docs.length);
+
+        const logsMap: Record<string, any> = { ...todayPrayerLogs };
+        snap.docs.forEach((doc) => {
+          const data = doc.data();
+          logsMap[data.User_ID] = data.prayers || {};
+          console.log('📄 Log for user:', data.User_ID, 'Prayers:', data.prayers);
+        });
+        setTodayPrayerLogs(logsMap);
+
+        let targetPrayer = challenge?.targetPrayer || 'Fajr';
+        if (targetPrayer === 'Fajr') targetPrayer = 'Subuh';
+
+        setMembers((prevMembers) =>
+          prevMembers.map((member) => {
+            const prayers = logsMap[member.uid] || {};
+            const hasPrayedToday =
+              prayers[targetPrayer] === 'Prayed on time' ||
+              prayers[targetPrayer] === 'Prayed late';
+            console.log(`🔍 Member: ${member.Username} has prayed ${targetPrayer}:`, hasPrayedToday);
+            return { ...member, hasPrayedToday };
+          })
+        );
+      });
+      unsubscribers.push(unsub);
+    });
+
+    return () => {
+      unsubscribers.forEach((unsub) => unsub());
+    };
+  }, [selectedCircle, members.map((m) => m.uid).join(','), challenge]);
+
+  // ---------- Feed listener (includes broadcasts) ----------
   useEffect(() => {
     if (!selectedCircle) return;
     const feedQ = query(
@@ -257,20 +316,9 @@ export default function CircleScreen() {
 
   // ---------- Challenge listener ----------
   useEffect(() => {
-    // For simplicity, we assume a single global challenge document with id 'current'
-    // In production, you might have per-circle challenges.
     const unsub = onSnapshot(doc(db, 'challenges', 'current'), (docSnap) => {
       if (docSnap.exists()) {
-        const data = docSnap.data();
-        setChallenge({
-          id: docSnap.id,
-          title: data.title || 'Weekly Challenge',
-          description: data.description || '',
-          targetPrayer: data.targetPrayer || 'Fajr',
-          startDate: data.startDate || new Date().toISOString().split('T')[0],
-          endDate: data.endDate || new Date(Date.now() + 7*24*60*60*1000).toISOString().split('T')[0],
-          requiredCount: data.requiredCount || 5,
-        });
+        setChallenge(docSnap.data() as Challenge);
       } else {
         setChallenge(null);
       }
@@ -278,48 +326,61 @@ export default function CircleScreen() {
     return unsub;
   }, []);
 
-  // Compute challenge progress based on members' today's prayer status
-  // For now, we'll just show a static progress if challenge exists
-  // Actually we need to count how many members have prayed the target prayer today.
-  // We'll update this when members change.
-  const challengeProgress = challenge && members.length > 0
-    ? Math.min((members.filter(m => m.hasPrayedToday).length / challenge.requiredCount) * 100, 100)
-    : 0;
-
-  // ---------- Wake Requests ----------
-  // For simplicity, we'll allow a user to send a wake request and others to accept.
-  // We'll store in 'wakeRequests' collection.
-  const handleWakeMeUp = async () => {
-    if (!uid || !selectedCircle) return;
-    Alert.alert(
-      '🌙 Wake Me Up',
-      'Send a wake-up request to your circle? If 2 friends accept, we\'ll ring your phone 15 min before Fajr.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Send Request',
-          onPress: async () => {
-            try {
-              await addDoc(collection(db, 'wakeRequests'), {
-                circleId: selectedCircle.id,
-                requesterUid: uid,
-                requesterName: fullName || username || 'Someone',
-                timestamp: new Date().toISOString(),
-                status: 'pending',
-                acceptedBy: [],
-              });
-              Alert.alert('Request sent', 'Waiting for 2 friends to accept.');
-            } catch (err) {
-              Alert.alert('Error', 'Could not send request.');
-            }
-          },
-        },
-      ]
+  // ---------- User's own wake request listener (all statuses) ----------
+  useEffect(() => {
+    if (!selectedCircle || !uid) return;
+    const userWakeQ = query(
+      collection(db, 'wakeRequests'),
+      where('circleId', '==', selectedCircle.id),
+      where('requesterUid', '==', uid)
     );
-  };
+    const unsub = onSnapshot(userWakeQ, (snap) => {
+      const requests = snap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          circleId: data.circleId || '',
+          requesterUid: data.requesterUid || '',
+          requesterName: data.requesterName || '',
+          timestamp: data.timestamp || new Date().toISOString(),
+          status: data.status || 'pending',
+          acceptedBy: data.acceptedBy || [],
+        };
+      });
+      // Sort: pending first, then accepted
+      const sorted = requests.sort((a, b) => {
+        if (a.status === 'pending' && b.status !== 'pending') return -1;
+        if (a.status !== 'pending' && b.status === 'pending') return 1;
+        return 0;
+      });
+      setMyWakeRequest(sorted[0] || null);
+    });
+    return unsub;
+  }, [selectedCircle, uid]);
 
-  // Listen for wake requests for current circle to show accept buttons (we can add a small UI)
-  // We'll just show a notification for now.
+  // ---------- Listener for accepted wake requests (for requester) ----------
+  useEffect(() => {
+    if (!selectedCircle || !uid) return;
+    const acceptedQ = query(
+      collection(db, 'wakeRequests'),
+      where('circleId', '==', selectedCircle.id),
+      where('status', '==', 'accepted'),
+      where('requesterUid', '==', uid)
+    );
+    const unsub = onSnapshot(acceptedQ, (snap) => {
+      snap.docChanges().forEach((change) => {
+        if (change.type === 'added') {
+          const data = change.doc.data();
+          const count = data.acceptedBy ? data.acceptedBy.length : 0;
+          Alert.alert(
+            '✅ Wake Request Accepted!',
+            `Your wake request has been accepted by ${count} friend(s). The alarm will ring 15 min before Subuh.`
+          );
+        }
+      });
+    });
+    return unsub;
+  }, [selectedCircle, uid]);
 
   // ---------- Circle actions ----------
   const createCircle = async () => {
@@ -428,6 +489,7 @@ export default function CircleScreen() {
     await deleteDoc(doc(db, 'circleRequests', req.id));
   };
 
+  // ---------- Cheer (send to specific member) ----------
   const openCheerModal = (targetUid: string, targetName: string) => {
     setCheerTargetUid(targetUid);
     setCheerTargetName(targetName);
@@ -452,28 +514,136 @@ export default function CircleScreen() {
     setCheerMessage('');
   };
 
-  // ---------- Encouragements listener ----------
-  useEffect(() => {
-    if (!uid) return;
-    const encQ = query(
-      collection(db, 'encouragements'),
-      where('To_UID', '==', uid),
-      orderBy('Created_At', 'desc')
-    );
-    const unsub = onSnapshot(encQ, (snap) => {
-      setEncouragements(
-        snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Encouragement, 'id'>) }))
-      );
-    });
-    return unsub;
-  }, [uid]);
+  // ---------- Circle Cheer (star button - send to all members) ----------
+  const sendCircleCheer = () => {
+    if (!selectedCircle || members.length === 0) {
+      Alert.alert('No members', 'Your circle is empty.');
+      return;
+    }
+    setCheerAllMessage('May Allah bless you all! 🌟');
+    setCheerAllModalVisible(true);
+  };
+
+  const sendCheerToAll = async () => {
+    const cheerMsg = cheerAllMessage || 'May Allah bless you all! 🌟';
+    try {
+      const memberUids = members.map(m => m.uid);
+      for (const memberUid of memberUids) {
+        if (memberUid === uid) continue;
+        await addDoc(collection(db, 'encouragements'), {
+          To_UID: memberUid,
+          From_UID: uid,
+          From_Name: fullName || username,
+          Message: cheerMsg,
+          Created_At: new Date().toISOString(),
+        });
+      }
+      Alert.alert('Cheers sent!', 'You sent encouragement to all circle members.');
+      setCheerAllModalVisible(false);
+      setCheerAllMessage('');
+    } catch (err) {
+      Alert.alert('Error', 'Could not send cheers.');
+    }
+  };
+
+  // ---------- Wake Me Up ----------
+  const handleWakeMeUp = () => {
+  // 👇 Defensive check: ensure we have a valid circle
+  if (!selectedCircle) {
+    Alert.alert('Error', 'No circle selected. Please try again.');
+    return;
+  }
+
+  Alert.alert(
+    '🌙 Wake Me Up',
+    'Send a wake-up request to your circle? If 2 friends accept, we\'ll ring your phone 15 min before Subuh.',
+    [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Send Request',
+        onPress: async () => {
+          try {
+            const docRef = await addDoc(collection(db, 'wakeRequests'), {
+              circleId: selectedCircle.id, // ✅ now guaranteed to exist
+              requesterUid: uid,
+              requesterName: fullName || username || 'Someone',
+              timestamp: new Date().toISOString(),
+              status: 'pending',
+              acceptedBy: [],
+            });
+            console.log('✅ Wake request created:', docRef.id);
+            Alert.alert('Request sent', 'Waiting for 2 friends to accept.');
+          } catch (err) {
+            console.error('❌ Error sending wake request:', err);
+            Alert.alert('Error', 'Could not send request. Please try again.');
+          }
+        },
+      },
+    ]
+  );
+};
+
+  // Accept a wake request
+  const acceptWakeRequest = async (requestId: string) => {
+    try {
+      await updateDoc(doc(db, 'wakeRequests', requestId), {
+        acceptedBy: arrayUnion(uid),
+      });
+      // Check if accepted count reaches 2 -> mark as accepted
+      const reqDoc = await getDoc(doc(db, 'wakeRequests', requestId));
+      if (reqDoc.exists()) {
+        const data = reqDoc.data();
+        if (data.acceptedBy && data.acceptedBy.length >= 2) {
+          await updateDoc(doc(db, 'wakeRequests', requestId), {
+            status: 'accepted',
+          });
+          Alert.alert('✅ Wake request accepted!', 'Two friends have accepted. Alarm will ring 15 min before Subuh.');
+        } else {
+          Alert.alert('✅ Request accepted', 'You accepted the wake request. Waiting for one more friend.');
+        }
+      }
+    } catch (err) {
+      Alert.alert('Error', 'Could not accept request.');
+    }
+  };
+
+  // Reject a wake request
+  const rejectWakeRequest = async (requestId: string) => {
+    try {
+      await updateDoc(doc(db, 'wakeRequests', requestId), {
+        status: 'rejected',
+      });
+      Alert.alert('Request rejected', 'You have rejected the wake request.');
+    } catch (err) {
+      Alert.alert('Error', 'Could not reject request.');
+    }
+  };
 
   // ---------- Broadcast ----------
-  const handleBroadcast = () => {
-    Alert.alert('📢 Broadcast', 'Send a notification to all circle members?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Send', onPress: () => Alert.alert('Broadcast sent', 'All members have been notified.') },
-    ]);
+  const openBroadcastModal = () => {
+    setBroadcastMessage('');
+    setBroadcastModalVisible(true);
+  };
+
+  const sendBroadcast = async () => {
+    if (!broadcastMessage.trim() || !selectedCircle || !uid) return;
+    try {
+      await addDoc(collection(db, 'feed'), {
+        circleId: selectedCircle.id,
+        userId: uid,
+        userName: fullName || username,
+        prayer: 'broadcast',
+        status: 'Broadcast',
+        message: broadcastMessage.trim(),
+        timestamp: new Date().toISOString(),
+        type: 'broadcast',
+      });
+      Alert.alert('Broadcast sent', 'Your message has been sent to all circle members.');
+      setBroadcastModalVisible(false);
+      setBroadcastMessage('');
+    } catch (err) {
+      Alert.alert('Error', 'Could not send broadcast.');
+    }
   };
 
   // ---------- Loading ----------
@@ -486,33 +656,54 @@ export default function CircleScreen() {
   }
   if (!uid) return null;
 
-  // ---------- Render ----------
+  // ---------- Render helpers ----------
   const renderMember = ({ item }: { item: Member }) => {
     const isYou = item.uid === uid;
     const firstLetter = (item.Username || item.Full_Name)?.charAt(0).toUpperCase() || '?';
-    const hasPrayedToday = item.hasPrayedToday || false;
-
     return (
-      <TouchableOpacity style={styles.memberCard} onPress={() => {}}>
+      <View style={styles.memberCard}>
         <View style={styles.avatarWrapper}>
-          <View style={[styles.avatarCircle, hasPrayedToday && styles.avatarPrayed]}>
+          <View style={[styles.avatarCircle, item.hasPrayedToday && styles.avatarPrayed]}>
             <Text style={styles.avatarText}>{firstLetter}</Text>
           </View>
-          {hasPrayedToday && <View style={styles.prayedBadge}><Text style={styles.prayedBadgeText}>✓</Text></View>}
+          {item.hasPrayedToday && (
+            <View style={styles.prayedBadge}>
+              <Text style={styles.prayedBadgeText}>✓</Text>
+            </View>
+          )}
         </View>
         <Text style={styles.memberName}>{item.Username || item.Full_Name}</Text>
         <Text style={styles.memberStreak}>{item.Current_Streak}d</Text>
         {isYou && <Text style={styles.youLabel}>(You)</Text>}
-      </TouchableOpacity>
+        {!isYou && (
+          <TouchableOpacity
+            style={styles.cheerButtonSmall}
+            onPress={() => openCheerModal(item.uid, item.Full_Name || item.Username)}
+          >
+            <Text style={styles.cheerButtonSmallText}>Cheer +</Text>
+          </TouchableOpacity>
+        )}
+      </View>
     );
   };
 
   const renderFeedItem = (item: FeedEntry) => {
-    const isPrayer = item.type === 'prayer' || item.type === 'qada';
+    const isBroadcast = item.type === 'broadcast';
     const isMissed = item.status === 'Missed';
-    const iconName = isMissed ? 'close-circle' : (item.type === 'qada' ? 'time-outline' : 'checkmark-circle');
-    const iconColor = isMissed ? COLORS.danger : (item.type === 'qada' ? COLORS.warning : COLORS.success);
-    const actionText = isMissed ? `missed ${item.prayer}` : (item.type === 'qada' ? `logged Qada for ${item.prayer}` : `prayed ${item.prayer} on time! 🌙`);
+    let iconName = isMissed ? 'close-circle' : (item.type === 'qada' ? 'time-outline' : 'checkmark-circle');
+    let iconColor = isMissed ? COLORS.danger : (item.type === 'qada' ? COLORS.warning : COLORS.success);
+    let actionText = '';
+    if (isBroadcast) {
+      iconName = 'megaphone-outline';
+      iconColor = COLORS.gold;
+      actionText = `📢 ${item.message || 'Broadcast message'}`;
+    } else if (isMissed) {
+      actionText = `missed ${item.prayer}`;
+    } else if (item.type === 'qada') {
+      actionText = `logged Qada for ${item.prayer}`;
+    } else {
+      actionText = `prayed ${item.prayer} on time! 🌙`;
+    }
     const timeAgo = item.timestamp ? new Date(item.timestamp).toLocaleString() : 'just now';
 
     return (
@@ -531,12 +722,22 @@ export default function CircleScreen() {
     );
   };
 
+  // Compute challenge progress
+  const challengeProgress = challenge && members.length > 0
+    ? Math.min((members.filter((m) => m.hasPrayedToday).length / challenge.requiredCount) * 100, 100)
+    : 0;
+  const prayedCount = members.filter((m) => m.hasPrayedToday).length;
+  const required = challenge?.requiredCount || 1;
+
+  console.log('📊 Challenge progress:', challengeProgress, 'prayedCount:', prayedCount, 'required:', required);
+
+  // ---------- Render ----------
   return (
     <View style={styles.container}>
       <AppHeader />
 
       <ScrollView style={styles.scrollContainer} contentContainerStyle={{ paddingBottom: 100 }}>
-        {/* Circle Selection (if multiple) */}
+        {/* Circle tabs if more than one */}
         {myCircles.length > 1 && (
           <View style={styles.circlePicker}>
             {myCircles.map((c) => (
@@ -546,9 +747,7 @@ export default function CircleScreen() {
                 onPress={() => setSelectedCircle(c)}
               >
                 <Text
-                  style={
-                    selectedCircle?.id === c.id ? styles.circleTabTextActive : styles.circleTabText
-                  }
+                  style={selectedCircle?.id === c.id ? styles.circleTabTextActive : styles.circleTabText}
                 >
                   {c.Circle_Name}
                 </Text>
@@ -562,12 +761,12 @@ export default function CircleScreen() {
             {/* Circle Header */}
             <View style={styles.circleHeader}>
               <Text style={styles.circleName}>{selectedCircle.Circle_Name}</Text>
-              <TouchableOpacity onPress={handleBroadcast} style={styles.broadcastButton}>
+              <TouchableOpacity onPress={openBroadcastModal} style={styles.broadcastButton}>
                 <Ionicons name="megaphone-outline" size={24} color={COLORS.gold} />
               </TouchableOpacity>
             </View>
 
-            {/* Active Members Carousel */}
+            {/* Members Carousel */}
             <View style={styles.carouselContainer}>
               <FlatList
                 horizontal
@@ -577,24 +776,59 @@ export default function CircleScreen() {
                 showsHorizontalScrollIndicator={false}
                 contentContainerStyle={styles.carouselContent}
                 ListFooterComponent={
-                  <TouchableOpacity style={styles.cheerFab} onPress={() => Alert.alert('Cheer', 'May Allah bless you all!')}>
+                  <TouchableOpacity
+                    style={styles.cheerFab}
+                    onPress={sendCircleCheer}
+                  >
                     <Ionicons name="star" size={24} color={COLORS.gold} />
                   </TouchableOpacity>
                 }
               />
             </View>
 
-            {/* Live Prayer Feed */}
+            {/* Live Feed - now scrollable independently */}
             <View style={styles.feedContainer}>
               <Text style={styles.sectionTitle}>📢 Live Feed</Text>
               {feed.length === 0 ? (
                 <Text style={styles.emptyFeedText}>No recent activity. Be the first to log a prayer!</Text>
               ) : (
-                feed.slice(0, 10).map(renderFeedItem)
+                <ScrollView
+                  style={styles.feedList}
+                  showsVerticalScrollIndicator={true}
+                  nestedScrollEnabled={true}
+                >
+                  {feed.slice(0, 10).map((item) => renderFeedItem(item))}
+                </ScrollView>
               )}
             </View>
 
-            {/* Challenge Progress */}
+            {/* Pending Wake Requests - for other users (not accepted yet) */}
+            {wakeRequests
+              .filter(req => req.requesterUid !== uid && !req.acceptedBy.includes(uid) && req.status === 'pending')
+              .length > 0 && (
+              <View style={styles.requestsBox}>
+                <Text style={styles.requestsTitle}>🌙 Wake Requests</Text>
+                {wakeRequests
+                  .filter(req => req.requesterUid !== uid && !req.acceptedBy.includes(uid) && req.status === 'pending')
+                  .map((req) => (
+                    <View key={req.id} style={styles.requestRow}>
+                      <Text style={styles.requestText}>
+                        {req.requesterName} wants to be woken up for Subuh.
+                      </Text>
+                      <View style={{ flexDirection: 'row', gap: 10 }}>
+                        <TouchableOpacity onPress={() => acceptWakeRequest(req.id)}>
+                          <Text style={styles.acceptText}>Accept</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity onPress={() => rejectWakeRequest(req.id)}>
+                          <Text style={styles.rejectText}>Reject</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ))}
+              </View>
+            )}
+
+            {/* Challenge */}
             {challenge && (
               <View style={styles.challengeCard}>
                 <Text style={styles.challengeTitle}>{challenge.title}</Text>
@@ -603,7 +837,7 @@ export default function CircleScreen() {
                   <View style={[styles.progressBar, { width: `${Math.min(challengeProgress, 100)}%` }]} />
                 </View>
                 <Text style={styles.challengeText}>
-                  {Math.round(Math.min(challengeProgress, 100))}% · {members.filter(m => m.hasPrayedToday).length}/{challenge.requiredCount} members have prayed today
+                  {Math.round(Math.min(challengeProgress, 100))}% · {prayedCount}/{required} members have prayed today
                 </Text>
                 <Text style={styles.challengeCountdown}>
                   Ends {new Date(challenge.endDate).toLocaleDateString()}
@@ -611,10 +845,32 @@ export default function CircleScreen() {
               </View>
             )}
 
+            {/* My Wake Request Status - persistent card */}
+            {myWakeRequest && (
+              <View style={[
+                styles.myWakeRequestCard,
+                { borderColor: myWakeRequest.status === 'accepted' ? COLORS.success : COLORS.warning }
+              ]}>
+                <Text style={[
+                  styles.myWakeRequestTitle,
+                  { color: myWakeRequest.status === 'accepted' ? COLORS.success : COLORS.warning }
+                ]}>
+                  {myWakeRequest.status === 'accepted'
+                    ? '🔔 Wake bell is ON!'
+                    : '⏳ Wake request pending'}
+                </Text>
+                <Text style={styles.myWakeRequestText}>
+                  {myWakeRequest.status === 'accepted'
+                    ? 'Two friends have accepted. Your alarm will ring 15 min before Subuh.'
+                    : `${myWakeRequest.acceptedBy.length}/2 friends have accepted.`}
+                </Text>
+              </View>
+            )}
+
             {/* Wake Me Up */}
             <TouchableOpacity style={styles.wakeButton} onPress={handleWakeMeUp}>
               <Ionicons name="moon-outline" size={24} color={COLORS.white} />
-              <Text style={styles.wakeButtonText}>🌙 Wake me for Fajr</Text>
+              <Text style={styles.wakeButtonText}>🌙 Wake me for Subuh</Text>
             </TouchableOpacity>
 
             {/* Incoming Requests */}
@@ -647,7 +903,7 @@ export default function CircleScreen() {
           </View>
         )}
 
-        {/* Action buttons - always visible */}
+        {/* Action Buttons (always visible) */}
         <View style={styles.actionRow}>
           <TouchableOpacity style={styles.actionButton} onPress={() => setCreateModalVisible(true)}>
             <Ionicons name="add-circle-outline" size={20} color={COLORS.emerald} />
@@ -668,7 +924,8 @@ export default function CircleScreen() {
         </View>
       </ScrollView>
 
-      {/* --- Modals (unchanged, but ensure they use new styles) --- */}
+      {/* --- Modals --- */}
+
       {/* Create Circle Modal */}
       <Modal visible={createModalVisible} transparent animationType="fade">
         <View style={styles.modalOverlay}>
@@ -739,7 +996,7 @@ export default function CircleScreen() {
         </View>
       </Modal>
 
-      {/* Cheer Modal */}
+      {/* Cheer Modal (send to specific member) */}
       <Modal visible={cheerModalVisible} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
@@ -769,31 +1026,62 @@ export default function CircleScreen() {
         </View>
       </Modal>
 
-      {/* View Encouragements Modal */}
-      <Modal visible={viewEncouragementsVisible} transparent animationType="slide">
+      {/* Broadcast Modal */}
+      <Modal visible={broadcastModalVisible} transparent animationType="fade">
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, { maxHeight: '80%' }]}>
-            <Text style={styles.modalTitle}>Encouragements Received</Text>
-            {encouragements.length === 0 ? (
-              <Text style={styles.emptyText}>No encouragements yet.</Text>
-            ) : (
-              <FlatList
-                data={encouragements}
-                keyExtractor={(item) => item.id}
-                renderItem={({ item }) => (
-                  <View style={styles.encouragementItem}>
-                    <Text style={styles.encouragementFrom}>From {item.From_Name}</Text>
-                    <Text style={styles.encouragementMessage}>“{item.Message}”</Text>
-                    <Text style={styles.encouragementDate}>
-                      {new Date(item.Created_At).toLocaleDateString()}
-                    </Text>
-                  </View>
-                )}
-              />
-            )}
-            <TouchableOpacity onPress={() => setViewEncouragementsVisible(false)}>
-              <Text style={styles.modalCancel}>Close</Text>
-            </TouchableOpacity>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>📢 Broadcast Message</Text>
+            <Text style={styles.modalLabel}>Write a message to all circle members:</Text>
+            <TextInput
+              style={[styles.input, styles.textArea]}
+              placeholder="Type your broadcast message..."
+              placeholderTextColor={COLORS.muted}
+              multiline
+              numberOfLines={6}
+              value={broadcastMessage}
+              onChangeText={setBroadcastMessage}
+            />
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+              <TouchableOpacity style={[styles.modalActionButton, { flex: 1 }]} onPress={sendBroadcast}>
+                <Text style={styles.modalActionText}>Send</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalActionButton, { flex: 1, backgroundColor: COLORS.border }]}
+                onPress={() => setBroadcastModalVisible(false)}
+              >
+                <Text style={[styles.modalActionText, { color: COLORS.charcoal }]}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Cheer All Modal */}
+      <Modal visible={cheerAllModalVisible} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Send Cheer to All</Text>
+            <Text style={styles.modalLabel}>Write a message for all circle members:</Text>
+            <TextInput
+              style={[styles.input, styles.textArea]}
+              placeholder="Type your cheer message..."
+              placeholderTextColor={COLORS.muted}
+              multiline
+              numberOfLines={4}
+              value={cheerAllMessage}
+              onChangeText={setCheerAllMessage}
+            />
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+              <TouchableOpacity style={[styles.modalActionButton, { flex: 1 }]} onPress={sendCheerToAll}>
+                <Text style={styles.modalActionText}>Send</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalActionButton, { flex: 1, backgroundColor: COLORS.border }]}
+                onPress={() => setCheerAllModalVisible(false)}
+              >
+                <Text style={[styles.modalActionText, { color: COLORS.charcoal }]}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -801,9 +1089,7 @@ export default function CircleScreen() {
   );
 }
 
-// Styles remain the same as in your current version, but ensure all used styles exist.
-// I'll include them here for completeness:
-
+// ---------- Styles ----------
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -870,6 +1156,7 @@ const styles = StyleSheet.create({
   },
   carouselContent: {
     paddingVertical: 8,
+    paddingHorizontal: 4,
     gap: 12,
   },
   memberCard: {
@@ -940,6 +1227,20 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     textAlign: 'center',
   },
+  cheerButtonSmall: {
+    marginTop: 4,
+    backgroundColor: COLORS.goldLight,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.gold,
+  },
+  cheerButtonSmallText: {
+    fontSize: 10,
+    fontWeight: 'bold',
+    color: COLORS.charcoal,
+  },
   cheerFab: {
     width: 56,
     height: 56,
@@ -958,6 +1259,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     marginBottom: 16,
+  },
+  feedList: {
+    maxHeight: 200,
   },
   sectionTitle: {
     fontSize: 16,
@@ -1128,6 +1432,22 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.muted,
   },
+  myWakeRequestCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 12,
+    padding: 14,
+    borderWidth: 1,
+    marginBottom: 12,
+  },
+  myWakeRequestTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  myWakeRequestText: {
+    fontSize: 13,
+    color: COLORS.muted,
+    marginTop: 4,
+  },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
@@ -1221,25 +1541,5 @@ const styles = StyleSheet.create({
     color: COLORS.charcoal,
     fontSize: 12,
     fontWeight: 'bold',
-  },
-  encouragementItem: {
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-    paddingVertical: 10,
-  },
-  encouragementFrom: {
-    color: COLORS.emerald,
-    fontWeight: 'bold',
-    fontSize: 13,
-  },
-  encouragementMessage: {
-    color: COLORS.charcoal,
-    fontSize: 14,
-    marginTop: 2,
-  },
-  encouragementDate: {
-    color: COLORS.muted,
-    fontSize: 10,
-    marginTop: 4,
   },
 });

@@ -642,7 +642,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.cream,
     paddingHorizontal: 20,
-    paddingTop: 50,
+    paddingTop: 0,
   },
   center: {
     flex: 1,

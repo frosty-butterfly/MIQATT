@@ -227,11 +227,11 @@ export default function StreakScreen() {
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
-    backgroundColor: COLORS.cream,
-    padding: 20,
-    paddingTop: 50,
-  },
+  flex: 1,
+  backgroundColor: COLORS.cream,
+  paddingHorizontal: 20,
+  paddingTop: 0,
+},
   center: {
     flex: 1,
     backgroundColor: COLORS.cream,

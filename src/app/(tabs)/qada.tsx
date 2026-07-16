@@ -419,10 +419,7 @@ export default function QadaScreen() {
 
 // ---------- Styles ----------
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.cream,
-  },
+  container: { flex: 1, backgroundColor: COLORS.cream, paddingHorizontal: 20, paddingTop: 0 },
   center: {
     flex: 1,
     alignItems: 'center',
