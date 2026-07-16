@@ -310,62 +310,73 @@ export default function DashboardScreen() {
 
   // ---- PRAYER TIMES (WAKTUSOLAT) ----
   const fetchPrayerTimes = async () => {
-    try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      let lat = 3.139;
-      let lon = 101.6869;
-      let hasRealLocation = false;
+  try {
+    // 1. Get location (fallback to KL if permission denied)
+    let lat = 3.139;
+    let lon = 101.6869;
+    let hasRealLocation = false;
 
-      if (status === "granted") {
-        const position = await Location.getCurrentPositionAsync({});
-        lat = position.coords.latitude;
-        lon = position.coords.longitude;
-        hasRealLocation = true;
-      } else {
-        setLocationError("Location permission denied — showing KL times.");
-      }
-
-      const solatRes = await fetch(`https://api.waktusolat.app/v2/solat/gps/${lat}/${lon}`);
-      if (!solatRes.ok) throw new Error(`API error: ${solatRes.status}`);
-      const solatJson = await solatRes.json();
-
-      const todayNum = new Date().getDate();
-      const todayEntry = solatJson?.prayers?.find((p: any) => p.day === todayNum);
-
-      if (todayEntry) {
-        const fmt = (epochSeconds: number) =>
-          new Date(epochSeconds * 1000).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-            hour12: false,
-          });
-        setPrayerTimes({
-          Subuh: fmt(todayEntry.fajr),
-          Zohor: fmt(todayEntry.dhuhr),
-          Asar: fmt(todayEntry.asr),
-          Maghrib: fmt(todayEntry.maghrib),
-          Isyak: fmt(todayEntry.isha),
-        });
-      } else {
-        setLocationError("Prayer times unavailable today.");
-      }
-
-      if (hasRealLocation) {
-        const places = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lon });
-        if (places.length > 0) {
-          const place = places[0];
-          const label = [place.district || place.subregion, place.region].filter(Boolean).join(", ");
-          setLocationLabel(label || solatJson.zone || "");
-        } else {
-          setLocationLabel(solatJson.zone || "");
-        }
-      } else {
-        setLocationLabel(solatJson.zone ? `Zone ${solatJson.zone}` : "");
-      }
-    } catch (err) {
-      setLocationError("Could not fetch prayer times.");
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status === 'granted') {
+      const position = await Location.getCurrentPositionAsync({});
+      lat = position.coords.latitude;
+      lon = position.coords.longitude;
+      hasRealLocation = true;
+    } else {
+      setLocationError('Location permission denied — showing times for Kuala Lumpur.');
     }
-  };
+
+    // 2. Get today's date in DD-MM-YYYY format (Aladhan expects)
+    const today = new Date();
+    const dateStr = `${today.getDate()}-${today.getMonth() + 1}-${today.getFullYear()}`;
+
+    // 3. Fetch from Aladhan API (CORS-friendly)
+    const url = `https://api.aladhan.com/v1/timings/${dateStr}?latitude=${lat}&longitude=${lon}&method=2`;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`API error: ${response.status}`);
+
+    const json = await response.json();
+    const timings = json.data.timings;
+
+    // Map Aladhan names to your app's names
+    const prayerTimesMap: Record<string, string> = {
+      Subuh: timings.Fajr,
+      Zohor: timings.Dhuhr,
+      Asar: timings.Asr,
+      Maghrib: timings.Maghrib,
+      Isyak: timings.Isha,
+    };
+
+    setPrayerTimes(prayerTimesMap);
+
+    // 4. Set location label
+    if (hasRealLocation) {
+      const places = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lon });
+      if (places.length > 0) {
+        const place = places[0];
+        const label = [place.district || place.subregion, place.region].filter(Boolean).join(', ');
+        setLocationLabel(label || '');
+      }
+    } else {
+      setLocationLabel('Kuala Lumpur (default)');
+    }
+  } catch (err) {
+    console.error('Prayer times fetch error:', err);
+    setLocationError('Could not fetch prayer times. Using fallback times for Kuala Lumpur.');
+
+    // 5. Fallback: set static times for Kuala Lumpur (approximate)
+    // These are for demonstration; you can adjust them.
+    const fallbackTimes = {
+      Subuh: '05:55',
+      Zohor: '13:21',
+      Asar: '16:45',
+      Maghrib: '19:29',
+      Isyak: '20:44',
+    };
+    setPrayerTimes(fallbackTimes);
+    setLocationLabel('Kuala Lumpur (fallback)');
+  }
+};
 
   // ---- COUNTDOWN LOGIC (NOW WITH SECONDS) ----
 useEffect(() => {
