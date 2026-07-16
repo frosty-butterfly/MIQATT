@@ -4,23 +4,33 @@ import { onAuthStateChanged, signOut, updateProfile } from "firebase/auth";
 import { deleteDoc, doc, getDoc, updateDoc } from "firebase/firestore";
 import { useEffect, useState } from "react";
 import {
-    ActivityIndicator,
-    Alert,
-    Modal,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Alert,
+  Modal,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from "react-native";
 import { auth, db } from "../../../firebaseConfig";
-import Header from "../../components/header";
-import { useClock } from "../../hooks/useClock";
+import AppHeader from "../../components/appHeader";
+
+const COLORS = {
+  cream: "#F8F4EC",
+  emerald: "#1E4D3A",
+  gold: "#D4AF37",
+  goldLight: "#F3E5AB",
+  charcoal: "#2C2C2C",
+  white: "#FFFFFF",
+  muted: "#A0A0A0",
+  border: "#E2DCD0",
+  danger: "#B71C1C",
+};
 
 export default function ProfileScreen() {
   const router = useRouter();
-  const { timeString, dateString } = useClock();
 
   const [authChecked, setAuthChecked] = useState(false);
   const [uid, setUid] = useState<string | null>(null);
@@ -36,7 +46,6 @@ export default function ProfileScreen() {
   const [editUsername, setEditUsername] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // NEW: confirmation modal
   const [confirmDeleteVisible, setConfirmDeleteVisible] = useState(false);
 
   useEffect(() => {
@@ -103,7 +112,6 @@ export default function ProfileScreen() {
   };
 
   const deleteAccount = () => {
-    console.log("Delete button pressed");
     setConfirmDeleteVisible(true);
   };
 
@@ -129,26 +137,28 @@ export default function ProfileScreen() {
 
   if (!authChecked || loading || deleting) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator color="#22c55e" />
+      <View style={[styles.center, { backgroundColor: COLORS.cream }]}>
+        <ActivityIndicator color={COLORS.emerald} />
       </View>
     );
   }
   if (!uid) return null;
 
+  const firstLetter = username.charAt(0).toUpperCase();
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 60 }}>
-      <Header
-        fullName={fullName}
-        onLogout={handleLogout}
-        locationLabel={undefined}
-        timeString={timeString}
-        dateString={dateString}
-      />
-
+      <AppHeader />
       <Text style={styles.title}>Profile</Text>
 
       <View style={styles.card}>
+        {/* Avatar */}
+        <View style={styles.avatarContainer}>
+          <View style={styles.avatarCircle}>
+            <Text style={styles.avatarText}>{firstLetter}</Text>
+          </View>
+        </View>
+
         <View style={styles.field}>
           <Text style={styles.label}>Full Name</Text>
           <Text style={styles.value}>{fullName || "Not set"}</Text>
@@ -184,7 +194,7 @@ export default function ProfileScreen() {
             <TextInput
               style={styles.input}
               placeholder="Full Name"
-              placeholderTextColor="#6b7280"
+              placeholderTextColor={COLORS.muted}
               value={editFullName}
               onChangeText={setEditFullName}
             />
@@ -192,7 +202,7 @@ export default function ProfileScreen() {
             <TextInput
               style={styles.input}
               placeholder="Username"
-              placeholderTextColor="#6b7280"
+              placeholderTextColor={COLORS.muted}
               autoCapitalize="none"
               value={editUsername}
               onChangeText={setEditUsername}
@@ -207,7 +217,7 @@ export default function ProfileScreen() {
         </View>
       </Modal>
 
-      {/* Custom Delete Confirmation Modal */}
+      {/* Delete Confirmation Modal */}
       <Modal visible={confirmDeleteVisible} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
@@ -217,16 +227,16 @@ export default function ProfileScreen() {
             </Text>
             <View style={{ flexDirection: "row", gap: 10, marginTop: 16 }}>
               <TouchableOpacity
-                style={[styles.actionButton, { backgroundColor: "#3f1d1d" }]}
+                style={[styles.actionButton, { backgroundColor: COLORS.danger }]}
                 onPress={confirmDelete}
               >
                 <Text style={styles.actionButtonText}>Delete</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.actionButton, { backgroundColor: "#2a2e37" }]}
+                style={[styles.actionButton, { backgroundColor: COLORS.border }]}
                 onPress={() => setConfirmDeleteVisible(false)}
               >
-                <Text style={[styles.actionButtonText, { color: "#9ca3af" }]}>Cancel</Text>
+                <Text style={[styles.actionButtonText, { color: COLORS.charcoal }]}>Cancel</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -237,63 +247,152 @@ export default function ProfileScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0f1115", padding: 20, paddingTop: 60 },
-  center: { flex: 1, backgroundColor: "#0f1115", alignItems: "center", justifyContent: "center" },
-  title: { color: "#fff", fontSize: 20, fontWeight: "bold", textAlign: "center", marginBottom: 16 },
+  container: {
+    flex: 1,
+    backgroundColor: COLORS.cream,
+    paddingHorizontal: 20,
+    paddingTop: 0,
+  },
+  center: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  title: {
+    fontSize: 22,
+    fontWeight: "bold",
+    color: COLORS.emerald,
+    textAlign: "center",
+    marginTop: 16,
+    marginBottom: 16,
+  },
   card: {
+    backgroundColor: COLORS.white,
+    borderRadius: 16,
+    padding: 20,
     borderWidth: 1,
-    borderColor: "#2a2e37",
-    borderRadius: 10,
-    padding: 16,
+    borderColor: COLORS.border,
     marginBottom: 20,
+    alignItems: "center",
   },
-  field: { marginBottom: 12 },
-  label: { color: "#6b7280", fontSize: 12, marginBottom: 4 },
-  value: { color: "#fff", fontSize: 16 },
+  avatarContainer: {
+    marginBottom: 16,
+  },
+  avatarCircle: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: COLORS.emerald,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: COLORS.gold,
+  },
+  avatarText: {
+    fontSize: 40,
+    color: COLORS.white,
+    fontWeight: "bold",
+  },
+  field: {
+    width: "100%",
+    marginBottom: 12,
+  },
+  label: {
+    fontSize: 12,
+    color: COLORS.muted,
+    marginBottom: 4,
+  },
+  value: {
+    fontSize: 16,
+    color: COLORS.charcoal,
+  },
   editButton: {
-    backgroundColor: "#1a3d2a",
-    borderRadius: 8,
+    backgroundColor: COLORS.gold,
+    borderRadius: 12,
     padding: 14,
     alignItems: "center",
     marginBottom: 12,
   },
-  editButtonText: { color: "#22c55e", fontWeight: "bold" },
+  editButtonText: {
+    color: COLORS.charcoal,
+    fontWeight: "bold",
+  },
   deleteButton: {
-    backgroundColor: "#3f1d1d",
-    borderRadius: 8,
+    backgroundColor: COLORS.danger + "20",
+    borderRadius: 12,
     padding: 14,
     alignItems: "center",
     marginBottom: 12,
-  },
-  deleteButtonText: { color: "#f87171", fontWeight: "bold" },
-  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "center", alignItems: "center" },
-  modalCard: { backgroundColor: "#1a1d23", borderRadius: 12, padding: 20, width: "85%" },
-  modalTitle: { color: "#fff", fontSize: 16, fontWeight: "bold", marginBottom: 16 },
-  modalLabel: { color: "#9ca3af", fontSize: 12, marginBottom: 8 },
-  input: {
-    backgroundColor: "#0f1115",
     borderWidth: 1,
-    borderColor: "#2a2e37",
-    borderRadius: 8,
-    padding: 10,
-    color: "#fff",
+    borderColor: COLORS.danger,
+  },
+  deleteButtonText: {
+    color: COLORS.danger,
+    fontWeight: "bold",
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  modalCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 20,
+    padding: 24,
+    width: "85%",
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: COLORS.emerald,
+    textAlign: "center",
+    marginBottom: 16,
+  },
+  modalLabel: {
+    color: COLORS.muted,
+    fontSize: 12,
+    marginBottom: 8,
+  },
+  input: {
+    backgroundColor: COLORS.cream,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    padding: 12,
+    color: COLORS.charcoal,
     marginBottom: 12,
   },
   saveButton: {
-    backgroundColor: "#22c55e",
-    borderRadius: 8,
+    backgroundColor: COLORS.gold,
+    borderRadius: 12,
     padding: 14,
     alignItems: "center",
     marginTop: 8,
   },
-  saveButtonText: { color: "#0f1115", fontWeight: "bold" },
-  modalCancel: { color: "#6b7280", marginTop: 12, textAlign: "center" },
-  confirmText: { color: "#fff", fontSize: 14, textAlign: "center", marginBottom: 8 },
+  saveButtonText: {
+    color: COLORS.charcoal,
+    fontWeight: "bold",
+  },
+  modalCancel: {
+    color: COLORS.muted,
+    marginTop: 12,
+    textAlign: "center",
+  },
+  confirmText: {
+    color: COLORS.charcoal,
+    fontSize: 14,
+    textAlign: "center",
+    marginBottom: 8,
+  },
   actionButton: {
     flex: 1,
     borderRadius: 8,
     padding: 12,
     alignItems: "center",
   },
-  actionButtonText: { color: "#fff", fontWeight: "bold" },
+  actionButtonText: {
+    color: COLORS.white,
+    fontWeight: "bold",
+  },
 });

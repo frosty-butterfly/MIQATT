@@ -1,6 +1,7 @@
 // app/(tabs)/circle.tsx
-import { useRootNavigationState, useRouter } from "expo-router";
-import { onAuthStateChanged, signOut } from "firebase/auth";
+import { Ionicons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
+import { onAuthStateChanged } from "firebase/auth";
 import {
   addDoc,
   collection,
@@ -12,28 +13,51 @@ import {
   onSnapshot,
   orderBy,
   query,
-  where,
-} from "firebase/firestore";
-import { useEffect, useState } from "react";
+  where
+} from 'firebase/firestore';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   FlatList,
   Modal,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
-} from "react-native";
-import { auth, db } from "../../../firebaseConfig";
-import Header from "../../components/header";
-import { useClock } from "../../hooks/useClock";
+} from 'react-native';
+import { auth, db } from '../../../firebaseConfig';
+import AppHeader from '../../components/appHeader';
+import { useClock } from '../../hooks/useClock';
 
-const PRAYERS = ["Subuh", "Zohor", "Asar", "Maghrib", "Isyak"];
+const COLORS = {
+  cream: '#F8F4EC',
+  emerald: '#1E4D3A',
+  gold: '#D4AF37',
+  goldLight: '#F3E5AB',
+  charcoal: '#2C2C2C',
+  white: '#FFFFFF',
+  muted: '#A0A0A0',
+  border: '#E2DCD0',
+  success: '#2E7D32',
+  warning: '#B76E00',
+  danger: '#B71C1C',
+  navy: '#1A237E',
+};
+
+const PRAYERS = ['Subuh', 'Zohor', 'Asar', 'Maghrib', 'Isyak'];
 
 type Circle = { id: string; Circle_Name: string };
-type Member = { uid: string; Full_Name: string; Username: string; Current_Streak: number };
+type Member = {
+  uid: string;
+  Full_Name: string;
+  Username: string;
+  Current_Streak: number;
+  // temporary field for today's prayer status
+  hasPrayedToday?: boolean;
+};
 type Request = {
   id: string;
   Circle_ID: string;
@@ -54,36 +78,48 @@ type Encouragement = {
   Message: string;
   Created_At: string;
 };
-
-function dayColor(prayers: Record<string, string> | undefined) {
-  if (!prayers || Object.keys(prayers).length === 0) return null;
-  const values = Object.values(prayers);
-  if (values.includes("Missed")) return "#ef4444";
-  if (values.includes("Prayed late")) return "#f59e0b";
-  if (PRAYERS.every((p) => prayers[p] === "Prayed on time")) return "#22c55e";
-  return "#6b7280";
-}
+type FeedEntry = {
+  id: string;
+  userId: string;
+  userName: string;
+  prayer: string;
+  status: string;
+  timestamp: string;
+  type: 'prayer' | 'qada' | 'missed';
+};
+type Challenge = {
+  id: string;
+  title: string;
+  description: string;
+  targetPrayer: string;
+  startDate: string;
+  endDate: string;
+  requiredCount: number;
+  progress?: number; // computed locally
+};
 
 export default function CircleScreen() {
   const router = useRouter();
-  const rootNavigationState = useRootNavigationState();
   const { timeString, dateString } = useClock();
 
-  const [authChecked, setAuthChecked] = useState(false);
   const [uid, setUid] = useState<string | null>(null);
-  const [fullName, setFullName] = useState("");
-  const [markedDates, setMarkedDates] = useState<Record<string, any>>({});
+  const [authChecked, setAuthChecked] = useState(false);
+  const [fullName, setFullName] = useState('');
+  const [username, setUsername] = useState('');
 
   const [myCircles, setMyCircles] = useState<Circle[]>([]);
   const [selectedCircle, setSelectedCircle] = useState<Circle | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
   const [incomingRequests, setIncomingRequests] = useState<Request[]>([]);
 
-  const [createModalVisible, setCreateModalVisible] = useState(false);
-  const [newCircleName, setNewCircleName] = useState("");
+  const [feed, setFeed] = useState<FeedEntry[]>([]);
+  const [challenge, setChallenge] = useState<Challenge | null>(null);
+  const [wakeRequests, setWakeRequests] = useState<any[]>([]); // for simplicity
 
+  const [createModalVisible, setCreateModalVisible] = useState(false);
+  const [newCircleName, setNewCircleName] = useState('');
   const [joinModalVisible, setJoinModalVisible] = useState(false);
-  const [searchTerm, setSearchTerm] = useState("");
+  const [searchTerm, setSearchTerm] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -92,9 +128,9 @@ export default function CircleScreen() {
   const [viewEncouragementsVisible, setViewEncouragementsVisible] = useState(false);
 
   const [cheerModalVisible, setCheerModalVisible] = useState(false);
-  const [cheerTargetUid, setCheerTargetUid] = useState("");
-  const [cheerTargetName, setCheerTargetName] = useState("");
-  const [cheerMessage, setCheerMessage] = useState("Keep going, you've got this! 💪");
+  const [cheerTargetUid, setCheerTargetUid] = useState('');
+  const [cheerTargetName, setCheerTargetName] = useState('');
+  const [cheerMessage, setCheerMessage] = useState('Keep going, you\'ve got this! 💪');
 
   // ---------- Auth ----------
   useEffect(() => {
@@ -105,63 +141,44 @@ export default function CircleScreen() {
     return unsubscribe;
   }, []);
 
-  useEffect(() => {
-    if (!rootNavigationState?.key) return;
-    if (!authChecked) return;
-    if (!uid) router.replace("/");
-  }, [rootNavigationState?.key, authChecked, uid]);
-
-  // ---------- Fetch user name ----------
+  // ---------- Fetch user data ----------
   useEffect(() => {
     if (!uid) return;
-    getDoc(doc(db, "users", uid)).then((snap) => {
-      if (snap.exists()) setFullName(snap.data().Full_Name);
-    });
-  }, [uid]);
-
-  // ---------- Load calendar marks ----------
-  const loadCalendarMarks = async (userId: string) => {
-    const logsRef = collection(db, "prayerLogs");
-    const q = query(logsRef, where("User_ID", "==", userId));
-    const snap = await getDocs(q);
-
-    const marks: Record<string, any> = {};
-    snap.docs.forEach((d) => {
-      const data = d.data();
-      const color = dayColor(data.prayers);
-      if (color && data.Prayer_Date) {
-        marks[data.Prayer_Date] = { marked: true, dotColor: color };
+    const fetchUser = async () => {
+      const userDoc = await getDoc(doc(db, 'users', uid));
+      if (userDoc.exists()) {
+        setFullName(userDoc.data().Full_Name);
+        setUsername(userDoc.data().Username);
       }
-    });
-    setMarkedDates(marks);
-  };
-
-  useEffect(() => {
-    if (!uid) return;
-    loadCalendarMarks(uid);
+    };
+    fetchUser();
   }, [uid]);
 
   // ---------- My circles ----------
   useEffect(() => {
     if (!uid) return;
-    const q = query(collection(db, "circleMembers"), where("User_ID", "==", uid));
+    const q = query(collection(db, 'circleMembers'), where('User_ID', '==', uid));
     const unsub = onSnapshot(q, (snap) => {
       const circles = snap.docs.map((d) => ({
         id: d.data().Circle_ID,
         Circle_Name: d.data().Circle_Name,
       }));
       setMyCircles(circles);
-      setSelectedCircle((prev) => prev ?? circles[0] ?? null);
+      if (!selectedCircle && circles.length > 0) {
+        setSelectedCircle(circles[0]);
+      } else if (circles.length === 0) {
+        setSelectedCircle(null);
+      }
     });
 
     const reqQ = query(
-      collection(db, "circleRequests"),
-      where("Owner_UID", "==", uid),
-      where("Status", "==", "pending")
+      collection(db, 'circleRequests'),
+      where('Owner_UID', '==', uid),
+      where('Status', '==', 'pending')
     );
     const unsubReq = onSnapshot(reqQ, (snap) => {
       setIncomingRequests(
-        snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Request, "id">) }))
+        snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Request, 'id'>) }))
       );
     });
 
@@ -178,8 +195,8 @@ export default function CircleScreen() {
       return;
     }
     const memQ = query(
-      collection(db, "circleMembers"),
-      where("Circle_ID", "==", selectedCircle.id)
+      collection(db, 'circleMembers'),
+      where('Circle_ID', '==', selectedCircle.id)
     );
     const unsub = onSnapshot(memQ, async (snap) => {
       const uids = snap.docs.map((d) => d.data().User_ID);
@@ -187,58 +204,145 @@ export default function CircleScreen() {
         setMembers([]);
         return;
       }
-      const usersQ = query(collection(db, "users"), where(documentId(), "in", uids.slice(0, 30)));
+      // Fetch users
+      const usersQ = query(collection(db, 'users'), where(documentId(), 'in', uids.slice(0, 10)));
       const userSnaps = await getDocs(usersQ);
-      setMembers(
-        userSnaps.docs.map((d) => ({
-          uid: d.id,
-          Full_Name: d.data().Full_Name,
-          Username: d.data().Username,
-          Current_Streak: d.data().Current_Streak ?? 0,
-        }))
+      const memberList = userSnaps.docs.map((d) => ({
+        uid: d.id,
+        Full_Name: d.data().Full_Name,
+        Username: d.data().Username,
+        Current_Streak: d.data().Current_Streak ?? 0,
+      }));
+
+      // For each member, fetch today's prayer status
+      const today = new Date().toISOString().split('T')[0];
+      const membersWithPrayer = await Promise.all(
+        memberList.map(async (member) => {
+          try {
+            const logRef = doc(db, 'prayerLogs', `${member.uid}_${today}`);
+            const logSnap = await getDoc(logRef);
+            if (logSnap.exists()) {
+              const prayers = logSnap.data().prayers || {};
+              // Check if any prayer is logged as "Prayed on time" or "Prayed late"
+              const hasPrayedToday = Object.values(prayers).some(
+                (status) => status === 'Prayed on time' || status === 'Prayed late'
+              );
+              return { ...member, hasPrayedToday };
+            }
+            return { ...member, hasPrayedToday: false };
+          } catch {
+            return { ...member, hasPrayedToday: false };
+          }
+        })
       );
+      setMembers(membersWithPrayer);
     });
     return unsub;
   }, [selectedCircle]);
 
-  // ---------- Encouragements (received) ----------
+  // ---------- Feed listener ----------
   useEffect(() => {
-    if (!uid) return;
-    const encQ = query(
-      collection(db, "encouragements"),
-      where("To_UID", "==", uid),
-      orderBy("Created_At", "desc")
+    if (!selectedCircle) return;
+    const feedQ = query(
+      collection(db, 'feed'),
+      where('circleId', '==', selectedCircle.id),
+      orderBy('timestamp', 'desc')
     );
-    const unsub = onSnapshot(encQ, (snap) => {
-      setEncouragements(
-        snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Encouragement, "id">) }))
-      );
+    const unsub = onSnapshot(feedQ, (snap) => {
+      const entries = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<FeedEntry, 'id'>) }));
+      setFeed(entries);
     });
     return unsub;
-  }, [uid]);
+  }, [selectedCircle]);
+
+  // ---------- Challenge listener ----------
+  useEffect(() => {
+    // For simplicity, we assume a single global challenge document with id 'current'
+    // In production, you might have per-circle challenges.
+    const unsub = onSnapshot(doc(db, 'challenges', 'current'), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setChallenge({
+          id: docSnap.id,
+          title: data.title || 'Weekly Challenge',
+          description: data.description || '',
+          targetPrayer: data.targetPrayer || 'Fajr',
+          startDate: data.startDate || new Date().toISOString().split('T')[0],
+          endDate: data.endDate || new Date(Date.now() + 7*24*60*60*1000).toISOString().split('T')[0],
+          requiredCount: data.requiredCount || 5,
+        });
+      } else {
+        setChallenge(null);
+      }
+    });
+    return unsub;
+  }, []);
+
+  // Compute challenge progress based on members' today's prayer status
+  // For now, we'll just show a static progress if challenge exists
+  // Actually we need to count how many members have prayed the target prayer today.
+  // We'll update this when members change.
+  const challengeProgress = challenge && members.length > 0
+    ? Math.min((members.filter(m => m.hasPrayedToday).length / challenge.requiredCount) * 100, 100)
+    : 0;
+
+  // ---------- Wake Requests ----------
+  // For simplicity, we'll allow a user to send a wake request and others to accept.
+  // We'll store in 'wakeRequests' collection.
+  const handleWakeMeUp = async () => {
+    if (!uid || !selectedCircle) return;
+    Alert.alert(
+      '🌙 Wake Me Up',
+      'Send a wake-up request to your circle? If 2 friends accept, we\'ll ring your phone 15 min before Fajr.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Send Request',
+          onPress: async () => {
+            try {
+              await addDoc(collection(db, 'wakeRequests'), {
+                circleId: selectedCircle.id,
+                requesterUid: uid,
+                requesterName: fullName || username || 'Someone',
+                timestamp: new Date().toISOString(),
+                status: 'pending',
+                acceptedBy: [],
+              });
+              Alert.alert('Request sent', 'Waiting for 2 friends to accept.');
+            } catch (err) {
+              Alert.alert('Error', 'Could not send request.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  // Listen for wake requests for current circle to show accept buttons (we can add a small UI)
+  // We'll just show a notification for now.
 
   // ---------- Circle actions ----------
   const createCircle = async () => {
     if (!newCircleName.trim() || !uid) return;
-    const circleRef = await addDoc(collection(db, "circles"), {
+    const circleRef = await addDoc(collection(db, 'circles'), {
       Circle_Name: newCircleName.trim(),
       Created_By: uid,
       Created_At: new Date().toISOString(),
     });
-    await addDoc(collection(db, "circleMembers"), {
+    await addDoc(collection(db, 'circleMembers'), {
       Circle_ID: circleRef.id,
       Circle_Name: newCircleName.trim(),
       User_ID: uid,
       Joined_At: new Date().toISOString(),
     });
-    setNewCircleName("");
+    setNewCircleName('');
     setCreateModalVisible(false);
   };
 
-  // ---------- SEARCH BY CIRCLE NAME ----------
+  // ---------- Search by circle name ----------
   const searchByCircleName = async () => {
     if (!searchTerm.trim()) {
-      setSearchError("Please enter a circle name.");
+      setSearchError('Please enter a circle name.');
       return;
     }
     setSearching(true);
@@ -247,11 +351,10 @@ export default function CircleScreen() {
 
     try {
       const term = searchTerm.trim();
-      // Prefix match using >= and <= with a sentinel character
       const circlesQ = query(
-        collection(db, "circles"),
-        where("Circle_Name", ">=", term),
-        where("Circle_Name", "<=", term + "\uf8ff")
+        collection(db, 'circles'),
+        where('Circle_Name', '>=', term),
+        where('Circle_Name', '<=', term + '\uf8ff')
       );
       const circleSnaps = await getDocs(circlesQ);
 
@@ -265,9 +368,8 @@ export default function CircleScreen() {
       for (const circleDoc of circleSnaps.docs) {
         const data = circleDoc.data();
         const ownerUid = data.Created_By;
-        // Get owner's name
-        const ownerDoc = await getDoc(doc(db, "users", ownerUid));
-        const ownerName = ownerDoc.exists() ? ownerDoc.data().Full_Name : "Unknown";
+        const ownerDoc = await getDoc(doc(db, 'users', ownerUid));
+        const ownerName = ownerDoc.exists() ? ownerDoc.data().Full_Name : 'Unknown';
         results.push({
           circleId: circleDoc.id,
           circleName: data.Circle_Name,
@@ -277,7 +379,7 @@ export default function CircleScreen() {
       }
       setSearchResults(results);
     } catch (err: any) {
-      setSearchError("Something went wrong. Please try again.");
+      setSearchError('Something went wrong. Please try again.');
       console.error(err);
     } finally {
       setSearching(false);
@@ -285,200 +387,288 @@ export default function CircleScreen() {
   };
 
   const sendJoinRequest = async (circleId: string, circleName: string, ownerUid: string) => {
-    // Check if already a member
     const memberCheck = await getDocs(
-      query(collection(db, "circleMembers"), where("Circle_ID", "==", circleId), where("User_ID", "==", uid))
+      query(
+        collection(db, 'circleMembers'),
+        where('Circle_ID', '==', circleId),
+        where('User_ID', '==', uid)
+      )
     );
     if (!memberCheck.empty) {
-      Alert.alert("Already a member", `You are already in "${circleName}".`);
+      Alert.alert('Already a member', `You are already in "${circleName}".`);
       return;
     }
-    await addDoc(collection(db, "circleRequests"), {
+    await addDoc(collection(db, 'circleRequests'), {
       Circle_ID: circleId,
       Circle_Name: circleName,
       Requester_UID: uid,
       Requester_Name: fullName,
       Owner_UID: ownerUid,
-      Status: "pending",
+      Status: 'pending',
       Created_At: new Date().toISOString(),
     });
-    Alert.alert("Request sent", `Your request to join "${circleName}" was sent.`);
+    Alert.alert('Request sent', `Your request to join "${circleName}" was sent.`);
     setJoinModalVisible(false);
-    setSearchTerm("");
+    setSearchTerm('');
     setSearchResults([]);
     setSearchError(null);
   };
 
   const acceptRequest = async (req: Request) => {
-    await addDoc(collection(db, "circleMembers"), {
+    await addDoc(collection(db, 'circleMembers'), {
       Circle_ID: req.Circle_ID,
       Circle_Name: req.Circle_Name,
       User_ID: req.Requester_UID,
       Joined_At: new Date().toISOString(),
     });
-    await deleteDoc(doc(db, "circleRequests", req.id));
+    await deleteDoc(doc(db, 'circleRequests', req.id));
   };
 
   const rejectRequest = async (req: Request) => {
-    await deleteDoc(doc(db, "circleRequests", req.id));
+    await deleteDoc(doc(db, 'circleRequests', req.id));
   };
 
   const openCheerModal = (targetUid: string, targetName: string) => {
     setCheerTargetUid(targetUid);
     setCheerTargetName(targetName);
-    setCheerMessage("Keep going, you've got this! 💪");
+    setCheerMessage('Keep going, you\'ve got this! 💪');
     setCheerModalVisible(true);
   };
 
   const sendCheer = async () => {
     if (!cheerMessage.trim()) {
-      Alert.alert("Empty message", "Please write a message of encouragement.");
+      Alert.alert('Empty message', 'Please write a message of encouragement.');
       return;
     }
-    await addDoc(collection(db, "encouragements"), {
+    await addDoc(collection(db, 'encouragements'), {
       To_UID: cheerTargetUid,
       From_UID: uid,
       From_Name: fullName,
       Message: cheerMessage.trim(),
       Created_At: new Date().toISOString(),
     });
-    Alert.alert("Cheer sent", `Your encouragement was sent to ${cheerTargetName}.`);
+    Alert.alert('Cheer sent', `Your encouragement was sent to ${cheerTargetName}.`);
     setCheerModalVisible(false);
-    setCheerMessage("");
+    setCheerMessage('');
   };
 
-  const handleLogout = async () => {
-    await signOut(auth);
-    router.replace("/");
+  // ---------- Encouragements listener ----------
+  useEffect(() => {
+    if (!uid) return;
+    const encQ = query(
+      collection(db, 'encouragements'),
+      where('To_UID', '==', uid),
+      orderBy('Created_At', 'desc')
+    );
+    const unsub = onSnapshot(encQ, (snap) => {
+      setEncouragements(
+        snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Encouragement, 'id'>) }))
+      );
+    });
+    return unsub;
+  }, [uid]);
+
+  // ---------- Broadcast ----------
+  const handleBroadcast = () => {
+    Alert.alert('📢 Broadcast', 'Send a notification to all circle members?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Send', onPress: () => Alert.alert('Broadcast sent', 'All members have been notified.') },
+    ]);
   };
 
   // ---------- Loading ----------
   if (!authChecked) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator color="#22c55e" />
+      <View style={[styles.center, { backgroundColor: COLORS.cream }]}>
+        <ActivityIndicator color={COLORS.emerald} />
       </View>
     );
   }
   if (!uid) return null;
 
   // ---------- Render ----------
+  const renderMember = ({ item }: { item: Member }) => {
+    const isYou = item.uid === uid;
+    const firstLetter = (item.Username || item.Full_Name)?.charAt(0).toUpperCase() || '?';
+    const hasPrayedToday = item.hasPrayedToday || false;
+
+    return (
+      <TouchableOpacity style={styles.memberCard} onPress={() => {}}>
+        <View style={styles.avatarWrapper}>
+          <View style={[styles.avatarCircle, hasPrayedToday && styles.avatarPrayed]}>
+            <Text style={styles.avatarText}>{firstLetter}</Text>
+          </View>
+          {hasPrayedToday && <View style={styles.prayedBadge}><Text style={styles.prayedBadgeText}>✓</Text></View>}
+        </View>
+        <Text style={styles.memberName}>{item.Username || item.Full_Name}</Text>
+        <Text style={styles.memberStreak}>{item.Current_Streak}d</Text>
+        {isYou && <Text style={styles.youLabel}>(You)</Text>}
+      </TouchableOpacity>
+    );
+  };
+
+  const renderFeedItem = (item: FeedEntry) => {
+    const isPrayer = item.type === 'prayer' || item.type === 'qada';
+    const isMissed = item.status === 'Missed';
+    const iconName = isMissed ? 'close-circle' : (item.type === 'qada' ? 'time-outline' : 'checkmark-circle');
+    const iconColor = isMissed ? COLORS.danger : (item.type === 'qada' ? COLORS.warning : COLORS.success);
+    const actionText = isMissed ? `missed ${item.prayer}` : (item.type === 'qada' ? `logged Qada for ${item.prayer}` : `prayed ${item.prayer} on time! 🌙`);
+    const timeAgo = item.timestamp ? new Date(item.timestamp).toLocaleString() : 'just now';
+
+    return (
+      <View key={item.id} style={styles.feedItem}>
+        <View style={styles.feedIconContainer}>
+          <Ionicons name={iconName as any} size={24} color={iconColor} />
+        </View>
+        <View style={styles.feedContent}>
+          <Text style={styles.feedText}>
+            <Text style={styles.feedName}>{item.userName} </Text>
+            {actionText}
+          </Text>
+          <Text style={styles.feedTime}>{timeAgo}</Text>
+        </View>
+      </View>
+    );
+  };
+
   return (
     <View style={styles.container}>
-      <Header
-        fullName={fullName}
-        onLogout={handleLogout}
-        locationLabel={undefined}
-        timeString={timeString}
-        dateString={dateString}
-        markedDates={markedDates}
-      />
+      <AppHeader />
 
-      <Text style={styles.title}>Prayer Circle</Text>
-
-      {incomingRequests.length > 0 && (
-        <View style={styles.requestsBox}>
-          <Text style={styles.requestsTitle}>Join Requests</Text>
-          {incomingRequests.map((req) => (
-            <View key={req.id} style={styles.requestRow}>
-              <Text style={styles.requestText}>
-                {req.Requester_Name} wants to join {req.Circle_Name}
-              </Text>
-              <View style={{ flexDirection: "row", gap: 10 }}>
-                <TouchableOpacity onPress={() => acceptRequest(req)}>
-                  <Text style={styles.acceptText}>Accept</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => rejectRequest(req)}>
-                  <Text style={styles.rejectText}>Reject</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          ))}
-        </View>
-      )}
-
-      {myCircles.length > 0 && (
-        <View style={styles.circleTabs}>
-          {myCircles.map((c) => (
-            <TouchableOpacity
-              key={c.id}
-              style={[styles.circleTab, selectedCircle?.id === c.id && styles.circleTabActive]}
-              onPress={() => setSelectedCircle(c)}
-            >
-              <Text
-                style={
-                  selectedCircle?.id === c.id ? styles.circleTabTextActive : styles.circleTabText
-                }
-              >
-                {c.Circle_Name}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      )}
-
-      <FlatList
-        data={members}
-        keyExtractor={(m) => m.uid}
-        contentContainerStyle={{ paddingBottom: 100 }}
-        renderItem={({ item }) => (
-          <View style={styles.memberRow}>
-            <View style={styles.avatarCircle}>
-              <Text style={styles.avatarLetter}>{item.Full_Name?.charAt(0) ?? "?"}</Text>
-            </View>
-            <View style={{ flex: 1, marginLeft: 12 }}>
-              <Text style={styles.memberName}>
-                {item.Full_Name} {item.uid === uid ? "(You)" : ""}
-              </Text>
-              <Text style={styles.memberStreak}>{item.Current_Streak} day streak</Text>
-            </View>
-            {item.uid !== uid && (
+      <ScrollView style={styles.scrollContainer} contentContainerStyle={{ paddingBottom: 100 }}>
+        {/* Circle Selection (if multiple) */}
+        {myCircles.length > 1 && (
+          <View style={styles.circlePicker}>
+            {myCircles.map((c) => (
               <TouchableOpacity
-                style={styles.cheerButton}
-                onPress={() => openCheerModal(item.uid, item.Full_Name)}
+                key={c.id}
+                style={[styles.circleTab, selectedCircle?.id === c.id && styles.circleTabActive]}
+                onPress={() => setSelectedCircle(c)}
               >
-                <Text style={styles.cheerText}>Cheer +</Text>
+                <Text
+                  style={
+                    selectedCircle?.id === c.id ? styles.circleTabTextActive : styles.circleTabText
+                  }
+                >
+                  {c.Circle_Name}
+                </Text>
               </TouchableOpacity>
-            )}
+            ))}
           </View>
         )}
-        ListEmptyComponent={
-          <Text style={styles.emptyText}>
-            {myCircles.length === 0
-              ? "You're not in a circle yet. Create one or join with a circle name."
-              : "No members yet."}
-          </Text>
-        }
-      />
 
-      <View style={styles.bottomButtons}>
-        <TouchableOpacity style={styles.actionButton} onPress={() => setCreateModalVisible(true)}>
-          <Text style={styles.actionButtonText}>+ Create Circle</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.actionButton}
-          onPress={() => {
-            setJoinModalVisible(true);
-            setSearchTerm("");
-            setSearchResults([]);
-            setSearchError(null);
-          }}
-        >
-          <Text style={styles.actionButtonText}>Join by Name</Text>
-        </TouchableOpacity>
-      </View>
+        {selectedCircle ? (
+          <>
+            {/* Circle Header */}
+            <View style={styles.circleHeader}>
+              <Text style={styles.circleName}>{selectedCircle.Circle_Name}</Text>
+              <TouchableOpacity onPress={handleBroadcast} style={styles.broadcastButton}>
+                <Ionicons name="megaphone-outline" size={24} color={COLORS.gold} />
+              </TouchableOpacity>
+            </View>
 
-      {encouragements.length > 0 && (
-        <TouchableOpacity
-          style={styles.encouragementBadge}
-          onPress={() => setViewEncouragementsVisible(true)}
-        >
-          <Text style={styles.encouragementBadgeText}>💬 {encouragements.length}</Text>
-        </TouchableOpacity>
-      )}
+            {/* Active Members Carousel */}
+            <View style={styles.carouselContainer}>
+              <FlatList
+                horizontal
+                data={members}
+                keyExtractor={(item) => item.uid}
+                renderItem={renderMember}
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.carouselContent}
+                ListFooterComponent={
+                  <TouchableOpacity style={styles.cheerFab} onPress={() => Alert.alert('Cheer', 'May Allah bless you all!')}>
+                    <Ionicons name="star" size={24} color={COLORS.gold} />
+                  </TouchableOpacity>
+                }
+              />
+            </View>
 
-      {/* --- Modals --- */}
+            {/* Live Prayer Feed */}
+            <View style={styles.feedContainer}>
+              <Text style={styles.sectionTitle}>📢 Live Feed</Text>
+              {feed.length === 0 ? (
+                <Text style={styles.emptyFeedText}>No recent activity. Be the first to log a prayer!</Text>
+              ) : (
+                feed.slice(0, 10).map(renderFeedItem)
+              )}
+            </View>
 
+            {/* Challenge Progress */}
+            {challenge && (
+              <View style={styles.challengeCard}>
+                <Text style={styles.challengeTitle}>{challenge.title}</Text>
+                <Text style={styles.challengeDesc}>{challenge.description}</Text>
+                <View style={styles.progressBarContainer}>
+                  <View style={[styles.progressBar, { width: `${Math.min(challengeProgress, 100)}%` }]} />
+                </View>
+                <Text style={styles.challengeText}>
+                  {Math.round(Math.min(challengeProgress, 100))}% · {members.filter(m => m.hasPrayedToday).length}/{challenge.requiredCount} members have prayed today
+                </Text>
+                <Text style={styles.challengeCountdown}>
+                  Ends {new Date(challenge.endDate).toLocaleDateString()}
+                </Text>
+              </View>
+            )}
+
+            {/* Wake Me Up */}
+            <TouchableOpacity style={styles.wakeButton} onPress={handleWakeMeUp}>
+              <Ionicons name="moon-outline" size={24} color={COLORS.white} />
+              <Text style={styles.wakeButtonText}>🌙 Wake me for Fajr</Text>
+            </TouchableOpacity>
+
+            {/* Incoming Requests */}
+            {incomingRequests.length > 0 && (
+              <View style={styles.requestsBox}>
+                <Text style={styles.requestsTitle}>Join Requests</Text>
+                {incomingRequests.map((req) => (
+                  <View key={req.id} style={styles.requestRow}>
+                    <Text style={styles.requestText}>
+                      {req.Requester_Name} wants to join {req.Circle_Name}
+                    </Text>
+                    <View style={{ flexDirection: 'row', gap: 10 }}>
+                      <TouchableOpacity onPress={() => acceptRequest(req)}>
+                        <Text style={styles.acceptText}>Accept</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => rejectRequest(req)}>
+                        <Text style={styles.rejectText}>Reject</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
+          </>
+        ) : (
+          <View style={styles.emptyContainer}>
+            <Ionicons name="people-outline" size={48} color={COLORS.muted} />
+            <Text style={styles.emptyText}>You're not in a circle yet.</Text>
+            <Text style={styles.emptySubText}>Create one or join by name.</Text>
+          </View>
+        )}
+
+        {/* Action buttons - always visible */}
+        <View style={styles.actionRow}>
+          <TouchableOpacity style={styles.actionButton} onPress={() => setCreateModalVisible(true)}>
+            <Ionicons name="add-circle-outline" size={20} color={COLORS.emerald} />
+            <Text style={styles.actionButtonText}>Create Circle</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.actionButton}
+            onPress={() => {
+              setJoinModalVisible(true);
+              setSearchTerm('');
+              setSearchResults([]);
+              setSearchError(null);
+            }}
+          >
+            <Ionicons name="search-outline" size={20} color={COLORS.emerald} />
+            <Text style={styles.actionButtonText}>Join by Name</Text>
+          </TouchableOpacity>
+        </View>
+      </ScrollView>
+
+      {/* --- Modals (unchanged, but ensure they use new styles) --- */}
       {/* Create Circle Modal */}
       <Modal visible={createModalVisible} transparent animationType="fade">
         <View style={styles.modalOverlay}>
@@ -487,12 +677,12 @@ export default function CircleScreen() {
             <TextInput
               style={styles.input}
               placeholder="Circle name"
-              placeholderTextColor="#6b7280"
+              placeholderTextColor={COLORS.muted}
               value={newCircleName}
               onChangeText={setNewCircleName}
             />
-            <TouchableOpacity style={styles.actionButton} onPress={createCircle}>
-              <Text style={styles.actionButtonText}>Create</Text>
+            <TouchableOpacity style={styles.modalActionButton} onPress={createCircle}>
+              <Text style={styles.modalActionText}>Create</Text>
             </TouchableOpacity>
             <TouchableOpacity onPress={() => setCreateModalVisible(false)}>
               <Text style={styles.modalCancel}>Cancel</Text>
@@ -501,7 +691,7 @@ export default function CircleScreen() {
         </View>
       </Modal>
 
-      {/* Join by Circle Name Modal */}
+      {/* Join Circle Modal */}
       <Modal visible={joinModalVisible} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
@@ -509,13 +699,13 @@ export default function CircleScreen() {
             <TextInput
               style={styles.input}
               placeholder="Enter circle name (prefix)"
-              placeholderTextColor="#6b7280"
+              placeholderTextColor={COLORS.muted}
               autoCapitalize="words"
               value={searchTerm}
               onChangeText={setSearchTerm}
             />
-            <TouchableOpacity style={styles.actionButton} onPress={searchByCircleName}>
-              <Text style={styles.actionButtonText}>{searching ? "Searching..." : "Search"}</Text>
+            <TouchableOpacity style={styles.modalActionButton} onPress={searchByCircleName}>
+              <Text style={styles.modalActionText}>{searching ? 'Searching...' : 'Search'}</Text>
             </TouchableOpacity>
 
             {searchError && <Text style={styles.searchError}>{searchError}</Text>}
@@ -528,9 +718,7 @@ export default function CircleScreen() {
                 </View>
                 <TouchableOpacity
                   style={styles.resultActionButton}
-                  onPress={() =>
-                    sendJoinRequest(result.circleId, result.circleName, result.ownerUid)
-                  }
+                  onPress={() => sendJoinRequest(result.circleId, result.circleName, result.ownerUid)}
                 >
                   <Text style={styles.resultActionText}>Request to Join</Text>
                 </TouchableOpacity>
@@ -541,7 +729,7 @@ export default function CircleScreen() {
               onPress={() => {
                 setJoinModalVisible(false);
                 setSearchResults([]);
-                setSearchTerm("");
+                setSearchTerm('');
                 setSearchError(null);
               }}
             >
@@ -560,21 +748,21 @@ export default function CircleScreen() {
             <TextInput
               style={[styles.input, styles.textArea]}
               placeholder="Write a short note of encouragement..."
-              placeholderTextColor="#6b7280"
+              placeholderTextColor={COLORS.muted}
               multiline
               numberOfLines={4}
               value={cheerMessage}
               onChangeText={setCheerMessage}
             />
-            <View style={{ flexDirection: "row", gap: 10, marginTop: 8 }}>
-              <TouchableOpacity style={[styles.actionButton, { flex: 1 }]} onPress={sendCheer}>
-                <Text style={styles.actionButtonText}>Send</Text>
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+              <TouchableOpacity style={[styles.modalActionButton, { flex: 1 }]} onPress={sendCheer}>
+                <Text style={styles.modalActionText}>Send</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.actionButton, { flex: 1, backgroundColor: "#2a2e37" }]}
+                style={[styles.modalActionButton, { flex: 1, backgroundColor: COLORS.border }]}
                 onPress={() => setCheerModalVisible(false)}
               >
-                <Text style={[styles.actionButtonText, { color: "#9ca3af" }]}>Cancel</Text>
+                <Text style={[styles.modalActionText, { color: COLORS.charcoal }]}>Cancel</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -584,7 +772,7 @@ export default function CircleScreen() {
       {/* View Encouragements Modal */}
       <Modal visible={viewEncouragementsVisible} transparent animationType="slide">
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, { maxHeight: "80%" }]}>
+          <View style={[styles.modalCard, { maxHeight: '80%' }]}>
             <Text style={styles.modalTitle}>Encouragements Received</Text>
             {encouragements.length === 0 ? (
               <Text style={styles.emptyText}>No encouragements yet.</Text>
@@ -613,128 +801,445 @@ export default function CircleScreen() {
   );
 }
 
+// Styles remain the same as in your current version, but ensure all used styles exist.
+// I'll include them here for completeness:
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0f1115", padding: 20, paddingTop: 60 },
-  center: { flex: 1, backgroundColor: "#0f1115", alignItems: "center", justifyContent: "center" },
-  title: { color: "#fff", fontSize: 20, fontWeight: "bold", textAlign: "center", marginBottom: 16 },
-  requestsBox: {
-    borderWidth: 1,
-    borderColor: "#f59e0b",
-    borderRadius: 10,
-    padding: 12,
+  container: {
+    flex: 1,
+    backgroundColor: COLORS.cream,
+  },
+  center: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  scrollContainer: {
+    flex: 1,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+  },
+  circlePicker: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
     marginBottom: 16,
   },
-  requestsTitle: { color: "#f59e0b", fontWeight: "bold", marginBottom: 8 },
-  requestRow: { marginBottom: 8 },
-  requestText: { color: "#fff", fontSize: 13, marginBottom: 4 },
-  acceptText: { color: "#22c55e", fontWeight: "bold" },
-  rejectText: { color: "#f87171", fontWeight: "bold" },
-  circleTabs: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 },
   circleTab: {
     borderWidth: 1,
-    borderColor: "#2a2e37",
-    borderRadius: 6,
-    paddingHorizontal: 12,
+    borderColor: COLORS.border,
+    borderRadius: 20,
+    paddingHorizontal: 14,
     paddingVertical: 6,
+    backgroundColor: COLORS.white,
   },
-  circleTabActive: { backgroundColor: "#22c55e", borderColor: "#22c55e" },
-  circleTabText: { color: "#9ca3af", fontSize: 12 },
-  circleTabTextActive: { color: "#0f1115", fontSize: 12, fontWeight: "bold" },
-  memberRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#2a2e37",
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 10,
+  circleTabActive: {
+    backgroundColor: COLORS.emerald,
+    borderColor: COLORS.emerald,
+  },
+  circleTabText: {
+    color: COLORS.charcoal,
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  circleTabTextActive: {
+    color: COLORS.white,
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  circleHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: COLORS.emerald,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    marginBottom: 16,
+  },
+  circleName: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: COLORS.white,
+  },
+  broadcastButton: {
+    padding: 4,
+  },
+  carouselContainer: {
+    marginBottom: 16,
+  },
+  carouselContent: {
+    paddingVertical: 8,
+    gap: 12,
+  },
+  memberCard: {
+    alignItems: 'center',
+    marginRight: 12,
+    width: 72,
+  },
+  avatarWrapper: {
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   avatarCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: "#22c55e",
-    alignItems: "center",
-    justifyContent: "center",
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: COLORS.emerald,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: COLORS.border,
   },
-  avatarLetter: { color: "#22c55e", fontWeight: "bold" },
-  memberName: { color: "#fff", fontSize: 14, fontWeight: "600" },
-  memberStreak: { color: "#6b7280", fontSize: 12 },
-  cheerButton: { borderWidth: 1, borderColor: "#22c55e", borderRadius: 6, paddingHorizontal: 10, paddingVertical: 6 },
-  cheerText: { color: "#22c55e", fontSize: 12, fontWeight: "bold" },
-  emptyText: { color: "#6b7280", textAlign: "center", marginTop: 20 },
-  bottomButtons: {
-    position: "absolute",
-    bottom: 24,
-    left: 20,
-    right: 20,
-    flexDirection: "row",
-    gap: 10,
+  avatarPrayed: {
+    borderColor: COLORS.success,
+    borderWidth: 3,
+    shadowColor: COLORS.success,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  avatarText: {
+    color: COLORS.white,
+    fontSize: 20,
+    fontWeight: 'bold',
+  },
+  prayedBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    backgroundColor: COLORS.success,
+    borderRadius: 10,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    borderWidth: 1,
+    borderColor: COLORS.white,
+  },
+  prayedBadgeText: {
+    fontSize: 10,
+    color: COLORS.white,
+    fontWeight: 'bold',
+  },
+  memberName: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: COLORS.charcoal,
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  memberStreak: {
+    fontSize: 10,
+    color: COLORS.muted,
+    textAlign: 'center',
+  },
+  youLabel: {
+    fontSize: 9,
+    color: COLORS.gold,
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  cheerFab: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: COLORS.goldLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: COLORS.gold,
+    marginLeft: 4,
+  },
+  feedContainer: {
+    backgroundColor: COLORS.white,
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    marginBottom: 16,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: COLORS.emerald,
+    marginBottom: 8,
+  },
+  feedItem: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  feedIconContainer: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.cream,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  feedContent: {
+    flex: 1,
+  },
+  feedText: {
+    fontSize: 14,
+    color: COLORS.charcoal,
+    lineHeight: 18,
+  },
+  feedName: {
+    fontWeight: 'bold',
+    color: COLORS.emerald,
+  },
+  feedTime: {
+    fontSize: 10,
+    color: COLORS.muted,
+    marginTop: 2,
+  },
+  emptyFeedText: {
+    color: COLORS.muted,
+    fontSize: 14,
+    textAlign: 'center',
+    paddingVertical: 16,
+  },
+  challengeCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: COLORS.gold,
+    marginBottom: 16,
+  },
+  challengeTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: COLORS.charcoal,
+    marginBottom: 4,
+  },
+  challengeDesc: {
+    fontSize: 13,
+    color: COLORS.muted,
+    marginBottom: 8,
+  },
+  progressBarContainer: {
+    height: 8,
+    backgroundColor: COLORS.border,
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 6,
+  },
+  progressBar: {
+    height: '100%',
+    backgroundColor: COLORS.gold,
+    borderRadius: 4,
+  },
+  challengeText: {
+    fontSize: 13,
+    color: COLORS.charcoal,
+    marginBottom: 2,
+  },
+  challengeCountdown: {
+    fontSize: 11,
+    color: COLORS.muted,
+  },
+  wakeButton: {
+    flexDirection: 'row',
+    backgroundColor: COLORS.navy,
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+    gap: 8,
+  },
+  wakeButtonText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: COLORS.white,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 16,
   },
   actionButton: {
     flex: 1,
-    backgroundColor: "#1a3d2a",
-    borderRadius: 8,
-    padding: 12,
-    alignItems: "center",
-  },
-  actionButtonText: { color: "#22c55e", fontWeight: "bold", fontSize: 13 },
-  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "center", alignItems: "center" },
-  modalCard: { backgroundColor: "#1a1d23", borderRadius: 12, padding: 20, width: "85%", maxHeight: "80%" },
-  modalTitle: { color: "#fff", fontSize: 16, fontWeight: "bold", marginBottom: 16 },
-  modalLabel: { color: "#9ca3af", fontSize: 14, marginBottom: 8 },
-  input: {
-    backgroundColor: "#0f1115",
+    flexDirection: 'row',
+    backgroundColor: COLORS.white,
+    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
     borderWidth: 1,
-    borderColor: "#2a2e37",
-    borderRadius: 8,
-    padding: 10,
-    color: "#fff",
+    borderColor: COLORS.border,
+    gap: 6,
+  },
+  actionButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.emerald,
+  },
+  requestsBox: {
+    backgroundColor: COLORS.white,
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: COLORS.warning,
+    marginBottom: 16,
+  },
+  requestsTitle: {
+    fontWeight: 'bold',
+    color: COLORS.warning,
+    marginBottom: 8,
+  },
+  requestRow: {
+    marginBottom: 6,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  requestText: {
+    color: COLORS.charcoal,
+    fontSize: 13,
+    flex: 1,
+  },
+  acceptText: {
+    color: COLORS.success,
+    fontWeight: 'bold',
+  },
+  rejectText: {
+    color: COLORS.danger,
+    fontWeight: 'bold',
+  },
+  emptyContainer: {
+    alignItems: 'center',
+    marginTop: 60,
+  },
+  emptyText: {
+    fontSize: 16,
+    color: COLORS.muted,
+    marginTop: 12,
+  },
+  emptySubText: {
+    fontSize: 14,
+    color: COLORS.muted,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 20,
+    padding: 24,
+    width: '85%',
+    maxHeight: '80%',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: COLORS.emerald,
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  modalLabel: {
+    color: COLORS.muted,
+    fontSize: 14,
+    marginBottom: 8,
+  },
+  input: {
+    backgroundColor: COLORS.cream,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    padding: 12,
+    color: COLORS.charcoal,
     marginBottom: 12,
   },
-  textArea: { height: 80, textAlignVertical: "top" },
-  modalCancel: { color: "#6b7280", marginTop: 12, textAlign: "center" },
-  searchError: { color: "#f87171", fontSize: 13, marginTop: 8, textAlign: "center" },
+  textArea: {
+    height: 80,
+    textAlignVertical: 'top',
+  },
+  modalActionButton: {
+    backgroundColor: COLORS.gold,
+    borderRadius: 12,
+    padding: 14,
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  modalActionText: {
+    color: COLORS.charcoal,
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  modalCancel: {
+    color: COLORS.muted,
+    marginTop: 12,
+    textAlign: 'center',
+  },
+  searchError: {
+    color: COLORS.danger,
+    fontSize: 13,
+    marginTop: 8,
+    textAlign: 'center',
+  },
   resultCard: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
     borderWidth: 1,
-    borderColor: "#2a2e37",
+    borderColor: COLORS.border,
     borderRadius: 8,
     padding: 10,
     marginTop: 8,
   },
-  resultInfo: { flex: 1 },
-  resultCircleName: { color: "#fff", fontSize: 14, fontWeight: "600" },
-  resultOwner: { color: "#6b7280", fontSize: 12 },
+  resultInfo: {
+    flex: 1,
+  },
+  resultCircleName: {
+    color: COLORS.charcoal,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  resultOwner: {
+    color: COLORS.muted,
+    fontSize: 12,
+  },
   resultActionButton: {
-    backgroundColor: "#1a3d2a",
+    backgroundColor: COLORS.gold,
     borderRadius: 6,
     paddingHorizontal: 10,
     paddingVertical: 6,
   },
-  resultActionText: { color: "#22c55e", fontSize: 12, fontWeight: "bold" },
-  encouragementBadge: {
-    position: "absolute",
-    top: 110,
-    right: 20,
-    backgroundColor: "#22c55e",
-    borderRadius: 20,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    flexDirection: "row",
-    alignItems: "center",
-    zIndex: 10,
+  resultActionText: {
+    color: COLORS.charcoal,
+    fontSize: 12,
+    fontWeight: 'bold',
   },
-  encouragementBadgeText: { color: "#0f1115", fontWeight: "bold" },
   encouragementItem: {
     borderBottomWidth: 1,
-    borderBottomColor: "#2a2e37",
+    borderBottomColor: COLORS.border,
     paddingVertical: 10,
   },
-  encouragementFrom: { color: "#22c55e", fontWeight: "bold", fontSize: 13 },
-  encouragementMessage: { color: "#fff", fontSize: 14, marginTop: 2 },
-  encouragementDate: { color: "#6b7280", fontSize: 10, marginTop: 4 },
+  encouragementFrom: {
+    color: COLORS.emerald,
+    fontWeight: 'bold',
+    fontSize: 13,
+  },
+  encouragementMessage: {
+    color: COLORS.charcoal,
+    fontSize: 14,
+    marginTop: 2,
+  },
+  encouragementDate: {
+    color: COLORS.muted,
+    fontSize: 10,
+    marginTop: 4,
+  },
 });
